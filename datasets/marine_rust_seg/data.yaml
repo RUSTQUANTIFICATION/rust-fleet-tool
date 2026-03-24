@@ -1,0 +1,11 @@
+path: datasets/marine_rust_seg
+
+train: images/train
+val: images/val
+
+names:
+  0: light_rust
+  1: moderate_rust
+  2: heavy_rust
+  3: coating_breakdown
+  4: pitting
