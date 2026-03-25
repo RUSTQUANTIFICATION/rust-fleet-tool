@@ -6,6 +6,8 @@
 # - Extract embedded images from Excel/Word
 # - Generate vessel PDF report (downloads images via URL)
 
+from __future__ import annotations
+
 import base64
 import io
 import os
@@ -38,14 +40,13 @@ from supabase import Client, create_client
 load_dotenv()
 
 # Import the enterprise analyzer you created in api/rust_analyzer.py
-# (make sure that file exists)
 from rust_analyzer import analyze_rust_bgr  # noqa: E402
 
 
 # -----------------------------
 # App
 # -----------------------------
-APP = FastAPI(title="Rust Fleet Analysis API")
+app = FastAPI(title="Rust Fleet Analysis API")
 
 
 # -----------------------------
@@ -62,7 +63,7 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 
 def supabase() -> Client:
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-        raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing in api/.env")
+        raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing in environment")
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
@@ -119,8 +120,8 @@ def analyze_rust_baseline(bgr: np.ndarray) -> Dict[str, Any]:
 
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
 
-    lower1 = np.array([5, 50, 50])     # orange/brown low
-    upper1 = np.array([25, 255, 255])  # orange/brown high
+    lower1 = np.array([5, 50, 50])
+    upper1 = np.array([25, 255, 255])
     mask = cv2.inRange(hsv, lower1, upper1)
 
     kernel = np.ones((5, 5), np.uint8)
@@ -173,29 +174,31 @@ def analyze_rust_baseline(bgr: np.ndarray) -> Dict[str, Any]:
 # -----------------------------
 # Endpoints
 # -----------------------------
-@APP.get("/health")
+@app.get("/health")
 def health():
     return {"ok": True}
 
 
-@APP.post("/analyze-photo")
+@app.get("/healthz")
+def health_check():
+    return {"status": "ok"}
+
+
+@app.post("/analyze-photo")
 async def analyze_photo(file: UploadFile = File(...)):
     """
     Enterprise analyzer:
     - Upload a single image
     - Returns rust percentages + severity + confidence + debug
-    (Overlay/mask can be stored later; currently compute-only)
     """
     if not file.content_type or not file.content_type.startswith("image/"):
         return JSONResponse(status_code=400, content={"error": "Please upload an image file."})
 
     data = await file.read()
 
-    # Decode robustly (works for jpg/png)
     try:
         bgr = read_image_to_bgr(data)
     except Exception:
-        # Fallback via PIL for uncommon formats
         pil = Image.open(io.BytesIO(data)).convert("RGB")
         rgb = np.array(pil)
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
@@ -214,11 +217,10 @@ async def analyze_photo(file: UploadFile = File(...)):
     }
 
 
-@APP.post("/extract")
+@app.post("/extract")
 async def extract_images(file: UploadFile = File(...)):
     """
     Upload an Excel/Word file and return extracted images as base64 PNG + names.
-    Next.js can re-upload these images to Supabase storage.
     """
     content = await file.read()
     filename = (file.filename or "").lower()
@@ -279,7 +281,7 @@ async def extract_images(file: UploadFile = File(...)):
     }
 
 
-@APP.post("/analyze")
+@app.post("/analyze")
 async def analyze(image: UploadFile = File(...)):
     """
     Baseline analyzer endpoint (for comparison / fallback).
@@ -289,16 +291,15 @@ async def analyze(image: UploadFile = File(...)):
     return analyze_rust_baseline(bgr)
 
 
-@APP.post("/report/vessel")
+@app.post("/report/vessel")
 async def report_vessel(
     vessel_name: str = Form(...),
     area: str = Form(...),
-    summary_json: str = Form(...),  # aggregated JSON from Next.js
-    photos_json: str = Form(...),   # photo list with URLs + rust % etc.
+    summary_json: str = Form(...),
+    photos_json: str = Form(...),
 ):
     """
     Generate a vessel PDF report.
-    Next.js aggregates data; Python renders PDF.
     photos_json expects items like:
       { "location_tag": "Hold 1", "rust_pct_total": 5.2, "image_url": "https://..." }
     """
