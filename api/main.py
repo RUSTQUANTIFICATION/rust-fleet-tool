@@ -1,24 +1,17 @@
 # api/main.py
-# Paste-ready, single-file FastAPI backend for Rust Fleet Tool
-# - Health check
-# - Analyze single photo (enterprise rust analyzer via rust_analyzer.py)
-# - Analyze baseline (simple HSV) for comparison
-# - Extract embedded images from Excel/Word
-# - Generate vessel PDF report (downloads images via URL)
-
 from __future__ import annotations
 
 import base64
 import io
+import json
 import os
 import uuid
 from datetime import date
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import cv2
 import numpy as np
 import openpyxl
-import pandas as pd
 import requests
 from dotenv import load_dotenv
 from docx import Document
@@ -36,22 +29,12 @@ from reportlab.platypus import (
 )
 from supabase import Client, create_client
 
-# Load environment variables from api/.env
+from rust_analyzer import RustConfig, analyze_rust_bgr
+
 load_dotenv()
 
-# Import the enterprise analyzer you created in api/rust_analyzer.py
-from rust_analyzer import analyze_rust_bgr  # noqa: E402
-
-
-# -----------------------------
-# App
-# -----------------------------
 app = FastAPI(title="Rust Fleet Analysis API")
 
-
-# -----------------------------
-# Env / Supabase helpers
-# -----------------------------
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 PHOTOS_BUCKET = os.environ.get("PHOTOS_BUCKET", "rust-photos")
@@ -67,27 +50,26 @@ def supabase() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
-def upload_to_storage(path: str, content: bytes, content_type: str) -> None:
+def upload_to_storage(path: str, content: bytes, content_type: str) -> str:
     sb = supabase()
     sb.storage.from_(PHOTOS_BUCKET).upload(
         path=path,
         file=content,
         file_options={"content-type": content_type, "upsert": "true"},
     )
+    return sb.storage.from_(PHOTOS_BUCKET).get_public_url(path)
 
 
-def upload_report(path: str, content: bytes, content_type: str) -> None:
+def upload_report(path: str, content: bytes, content_type: str) -> str:
     sb = supabase()
     sb.storage.from_(REPORTS_BUCKET).upload(
         path=path,
         file=content,
         file_options={"content-type": content_type, "upsert": "true"},
     )
+    return sb.storage.from_(REPORTS_BUCKET).get_public_url(path)
 
 
-# -----------------------------
-# Image helpers
-# -----------------------------
 def read_image_to_bgr(file_bytes: bytes) -> np.ndarray:
     npbuf = np.frombuffer(file_bytes, dtype=np.uint8)
     img = cv2.imdecode(npbuf, cv2.IMREAD_COLOR)
@@ -96,14 +78,67 @@ def read_image_to_bgr(file_bytes: bytes) -> np.ndarray:
     return img
 
 
-# -----------------------------
-# Baseline rust analysis (simple)
-# -----------------------------
+def read_storage_image_as_bgr(storage_path: str) -> np.ndarray:
+    sb = supabase()
+    data = sb.storage.from_(PHOTOS_BUCKET).download(storage_path)
+    if not data:
+        raise RuntimeError(f"Could not download image from storage path: {storage_path}")
+
+    pil = Image.open(io.BytesIO(data)).convert("RGB")
+    rgb = np.array(pil)
+    return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+
+def encode_jpg(img_bgr: np.ndarray, quality: int = 90) -> bytes:
+    ok, buf = cv2.imencode(".jpg", img_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    if not ok:
+        raise RuntimeError("Could not encode JPG")
+    return buf.tobytes()
+
+
+def upsert_photo_findings(
+    photo_id: str,
+    storage_path: str,
+    marked_path: str,
+    mask_path: str,
+    result: Any,
+) -> None:
+    sb = supabase()
+
+    raw_debug = result.debug if isinstance(result.debug, dict) else {"debug": result.debug}
+
+    payload: Dict[str, Any] = {
+        "photo_id": photo_id,
+        "rust_pct_total": float(result.rust_pct_total),
+        "rust_pct_light": float(result.rust_pct_light),
+        "rust_pct_moderate": float(result.rust_pct_moderate),
+        "rust_pct_heavy": float(result.rust_pct_heavy),
+        "overall_severity": str(result.severity),
+        "confidence_score": float(result.confidence),
+        "analysis_status": "COMPLETED",
+        "original_image_path": storage_path,
+        "marked_image_path": marked_path,
+        "mask_image_path": mask_path,
+        "raw_warnings": raw_debug,
+    }
+
+    existing = (
+        sb.from_("photo_findings")
+        .select("id")
+        .eq("photo_id", photo_id)
+        .maybe_single()
+        .execute()
+    )
+
+    existing_row = getattr(existing, "data", None)
+
+    if existing_row and existing_row.get("id"):
+        sb.from_("photo_findings").update(payload).eq("id", existing_row["id"]).execute()
+    else:
+        sb.from_("photo_findings").insert(payload).execute()
+
+
 def analyze_rust_baseline(bgr: np.ndarray) -> Dict[str, Any]:
-    """
-    Baseline: rust detection using HSV threshold + morphology.
-    Returns rust % and severity buckets (simple proxy using saturation/value).
-    """
     if bgr is None or bgr.size == 0:
         raise ValueError("Empty image")
 
@@ -132,7 +167,7 @@ def analyze_rust_baseline(bgr: np.ndarray) -> Dict[str, Any]:
     total_pixels = int(h * w)
     rust_pct_total = (rust_pixels / total_pixels) * 100.0
 
-    H, S, V = cv2.split(hsv)
+    _, S, V = cv2.split(hsv)
     rust_idx = mask > 0
     if rust_pixels == 0:
         return {
@@ -171,9 +206,6 @@ def analyze_rust_baseline(bgr: np.ndarray) -> Dict[str, Any]:
     }
 
 
-# -----------------------------
-# Endpoints
-# -----------------------------
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -185,43 +217,83 @@ def health_check():
 
 
 @app.post("/analyze-photo")
-async def analyze_photo(file: UploadFile = File(...)):
+async def analyze_photo(
+    photo_id: str = Form(...),
+    storage_path: str = Form(...),
+    area_type: str = Form(...),
+    location_tag: Optional[str] = Form(None),
+):
     """
-    Enterprise analyzer:
-    - Upload a single image
-    - Returns rust percentages + severity + confidence + debug
+    Production upload flow:
+    frontend sends photo_id + storage_path after upload to Supabase.
+    Backend downloads original image from storage, runs analyzer,
+    uploads marked/masked outputs back to storage, and upserts photo_findings.
     """
-    if not file.content_type or not file.content_type.startswith("image/"):
-        return JSONResponse(status_code=400, content={"error": "Please upload an image file."})
-
-    data = await file.read()
-
     try:
-        bgr = read_image_to_bgr(data)
-    except Exception:
-        pil = Image.open(io.BytesIO(data)).convert("RGB")
-        rgb = np.array(pil)
-        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        bgr = read_storage_image_as_bgr(storage_path)
 
-    result, mask, overlay = analyze_rust_bgr(bgr)
+        cfg = RustConfig(area_type=area_type or "MAIN_DECK")
+        result, mask, overlay = analyze_rust_bgr(bgr, cfg)
 
-    return {
-        "filename": file.filename,
-        "rust_pct_total": result.rust_pct_total,
-        "rust_pct_light": result.rust_pct_light,
-        "rust_pct_moderate": result.rust_pct_moderate,
-        "rust_pct_heavy": result.rust_pct_heavy,
-        "severity": result.severity,
-        "confidence": result.confidence,
-        "debug": result.debug,
-    }
+        base_name = os.path.basename(storage_path)
+        stem, _ = os.path.splitext(base_name)
+        folder = os.path.dirname(storage_path)
+
+        marked_path = f"{folder}/{stem}_marked.jpg"
+        mask_path = f"{folder}/{stem}_mask.jpg"
+
+        if len(mask.shape) == 2:
+            mask_vis = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+        else:
+            mask_vis = mask
+
+        marked_url = upload_to_storage(marked_path, encode_jpg(overlay, 88), "image/jpeg")
+        masked_url = upload_to_storage(mask_path, encode_jpg(mask_vis, 88), "image/jpeg")
+
+        upsert_photo_findings(
+            photo_id=photo_id,
+            storage_path=storage_path,
+            marked_path=marked_path,
+            mask_path=mask_path,
+            result=result,
+        )
+
+        return JSONResponse(
+            {
+                "ok": True,
+                "photo_id": photo_id,
+                "storage_path": storage_path,
+                "area_type": area_type,
+                "location_tag": location_tag,
+                "rust_pct_total": float(result.rust_pct_total),
+                "rust_pct_light": float(result.rust_pct_light),
+                "rust_pct_moderate": float(result.rust_pct_moderate),
+                "rust_pct_heavy": float(result.rust_pct_heavy),
+                "severity": str(result.severity),
+                "confidence": float(result.confidence),
+                "marked_url": marked_url,
+                "masked_url": masked_url,
+                "marked_image_path": marked_path,
+                "mask_image_path": mask_path,
+            }
+        )
+
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "error": str(e),
+                "photo_id": photo_id,
+                "storage_path": storage_path,
+                "area_type": area_type,
+                "location_tag": location_tag,
+            },
+        )
 
 
 @app.post("/extract")
 async def extract_images(file: UploadFile = File(...)):
-    """
-    Upload an Excel/Word file and return extracted images as base64 PNG + names.
-    """
     content = await file.read()
     filename = (file.filename or "").lower()
 
@@ -283,9 +355,6 @@ async def extract_images(file: UploadFile = File(...)):
 
 @app.post("/analyze")
 async def analyze(image: UploadFile = File(...)):
-    """
-    Baseline analyzer endpoint (for comparison / fallback).
-    """
     content = await image.read()
     bgr = read_image_to_bgr(content)
     return analyze_rust_baseline(bgr)
@@ -298,13 +367,6 @@ async def report_vessel(
     summary_json: str = Form(...),
     photos_json: str = Form(...),
 ):
-    """
-    Generate a vessel PDF report.
-    photos_json expects items like:
-      { "location_tag": "Hold 1", "rust_pct_total": 5.2, "image_url": "https://..." }
-    """
-    import json
-
     summary = json.loads(summary_json)
     photos = json.loads(photos_json)
 
@@ -329,7 +391,7 @@ async def report_vessel(
     for idx, p in enumerate(photos, start=1):
         story.append(
             Paragraph(
-                f"{idx}. {p.get('location_tag','(no tag)')} - Rust {p.get('rust_pct_total')}%",
+                f"{idx}. {p.get('location_tag', '(no tag)')} - Rust {p.get('rust_pct_total')}%",
                 styles["Normal"],
             )
         )
