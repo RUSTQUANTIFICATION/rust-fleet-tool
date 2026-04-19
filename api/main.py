@@ -16,6 +16,7 @@ import requests
 from dotenv import load_dotenv
 from docx import Document
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from PIL import Image
 from reportlab.lib.pagesizes import A4
@@ -34,6 +35,20 @@ from rust_analyzer import RustConfig, analyze_rust_bgr
 load_dotenv()
 
 app = FastAPI(title="Rust Fleet Analysis API")
+
+# CORS: allow frontend to call Render backend
+ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "https://rust-fleet-tool.vercel.app",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
