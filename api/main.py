@@ -236,6 +236,14 @@ async def analyze_photo(
     print("location_tag:", location_tag)
 
     try:
+        # Convert full URL → relative path
+        if storage_path.startswith("http"):
+            marker = f"/storage/v1/object/public/{PHOTOS_BUCKET}/"
+            if marker in storage_path:
+                storage_path = storage_path.split(marker)[1]
+
+        print("FINAL storage_path used:", storage_path)
+
         bgr = read_storage_image_as_bgr(storage_path)
         print("Image downloaded from storage successfully. shape:", getattr(bgr, "shape", None))
 
