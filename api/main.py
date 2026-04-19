@@ -229,11 +229,26 @@ async def analyze_photo(
     Backend downloads original image from storage, runs analyzer,
     uploads marked/masked outputs back to storage, and upserts photo_findings.
     """
+    print("=== ANALYZE-PHOTO START ===")
+    print("photo_id:", photo_id)
+    print("storage_path (incoming):", storage_path)
+    print("area_type:", area_type)
+    print("location_tag:", location_tag)
+
     try:
         bgr = read_storage_image_as_bgr(storage_path)
+        print("Image downloaded from storage successfully. shape:", getattr(bgr, "shape", None))
 
         cfg = RustConfig(area_type=area_type or "MAIN_DECK")
         result, mask, overlay = analyze_rust_bgr(bgr, cfg)
+        print(
+            "Analysis completed:",
+            {
+                "rust_pct_total": float(result.rust_pct_total),
+                "severity": str(result.severity),
+                "confidence": float(result.confidence),
+            },
+        )
 
         base_name = os.path.basename(storage_path)
         stem, _ = os.path.splitext(base_name)
@@ -242,13 +257,19 @@ async def analyze_photo(
         marked_path = f"{folder}/{stem}_marked.jpg"
         mask_path = f"{folder}/{stem}_mask.jpg"
 
+        print("marked_path:", marked_path)
+        print("mask_path:", mask_path)
+
         if len(mask.shape) == 2:
             mask_vis = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
         else:
             mask_vis = mask
 
         marked_url = upload_to_storage(marked_path, encode_jpg(overlay, 88), "image/jpeg")
+        print("marked_url:", marked_url)
+
         masked_url = upload_to_storage(mask_path, encode_jpg(mask_vis, 88), "image/jpeg")
+        print("masked_url:", masked_url)
 
         upsert_photo_findings(
             photo_id=photo_id,
@@ -257,7 +278,9 @@ async def analyze_photo(
             mask_path=mask_path,
             result=result,
         )
+        print("photo_findings upsert completed")
 
+        print("=== ANALYZE-PHOTO SUCCESS ===")
         return JSONResponse(
             {
                 "ok": True,
@@ -279,6 +302,8 @@ async def analyze_photo(
         )
 
     except Exception as e:
+        print("=== ANALYZE-PHOTO ERROR ===")
+        print("error:", repr(e))
         return JSONResponse(
             status_code=500,
             content={
