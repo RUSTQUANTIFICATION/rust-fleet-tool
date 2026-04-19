@@ -36,15 +36,14 @@ load_dotenv()
 
 app = FastAPI(title="Rust Fleet Analysis API")
 
-# CORS: allow frontend to call Render backend
-ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "https://rust-fleet-tool.vercel.app",
-]
-
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=[
+        "http://localhost:3000",
+        "https://rust-fleet-tool.vercel.app",
+    ],
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
