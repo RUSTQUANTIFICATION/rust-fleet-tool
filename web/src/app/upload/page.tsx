@@ -701,30 +701,115 @@ export default function UploadPage() {
       setProgressPct(30);
       setProgressLabel("Source file uploaded. Processing extraction...");
 
-      const res = await fetch(`${API_BASE}/ingest-source-file`, {
+      const extractRes = await fetch(`${API_BASE}/extract`, {
         method: "POST",
         body: formData,
       });
 
-      if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(txt || `HTTP ${res.status}`);
+      if (!extractRes.ok) {
+        const txt = await extractRes.text();
+        throw new Error(txt || `HTTP ${extractRes.status}`);
       }
 
-      const data = await res.json();
+      const extractData = await extractRes.json();
+      const images = Array.isArray(extractData?.images) ? extractData.images : [];
 
-      setProgressPct(90);
-      setProgressLabel("Finalizing extracted results...");
+      if (!images.length) {
+        throw new Error("No images found in source file");
+      }
 
-      setApiResults(
-        Array.isArray(data?.results)
-          ? data.results.filter((r) => r && typeof r === "object")
-          : []
-      );
+      setProgressPct(35);
+      setProgressLabel(`Extracted ${images.length} image(s). Uploading and analyzing...`);
+
+      const collectedResults: any[] = [];
+
+      for (let i = 0; i < images.length; i++) {
+        const img = images[i];
+        const fileName =
+          img?.name ||
+          `extracted_${i + 1}.png`;
+
+        const base64Value =
+          typeof img?.base64 === "string"
+            ? img.base64
+            : "";
+
+        if (!base64Value) {
+          continue;
+        }
+
+        const mimeType = img?.content_type || "image/png";
+        const byteString = atob(base64Value);
+        const ab = new ArrayBuffer(byteString.length);
+        const ia = new Uint8Array(ab);
+
+        for (let j = 0; j < byteString.length; j++) {
+          ia[j] = byteString.charCodeAt(j);
+        }
+
+        const blob = new Blob([ab], { type: mimeType });
+        const extractedFile = new File([blob], fileName, { type: mimeType });
+
+        setProgressLabel(`Uploading extracted image ${i + 1}/${images.length}: ${fileName}`);
+
+        const safeName = `${Date.now()}_${i + 1}_${fileName.replace(/\s+/g, "_")}`;
+        const storagePath = `${vesselId}/${areaType}/${safeName}`;
+
+        const { error: uploadError } = await supabase.storage
+          .from("rust-photos")
+          .upload(storagePath, extractedFile, {
+            upsert: true,
+            contentType: mimeType,
+          });
+
+        if (uploadError) {
+          throw new Error(`Upload failed for ${fileName}: ${uploadError.message}`);
+        }
+
+        const publicUrl = supabase.storage.from("rust-photos").getPublicUrl(storagePath).data.publicUrl;
+        const photoId = crypto.randomUUID();
+
+        await supabase.from("inspection_photos").insert({
+          id: photoId,
+          vessel_id: vesselId,
+          area_type: areaType,
+          location_tag: fileName.replace(/\.[^.]+$/, ""),
+          image_path: storagePath,
+          image_url: publicUrl,
+          uploaded_by: profile?.id || null,
+          review_status: "PENDING",
+        });
+
+        setProgressLabel(`Analyzing extracted image ${i + 1}/${images.length}: ${fileName}`);
+
+        const analyzeForm = new FormData();
+        analyzeForm.append("photo_id", photoId);
+        analyzeForm.append("storage_path", storagePath);
+        analyzeForm.append("area_type", areaType);
+        analyzeForm.append("location_tag", fileName.replace(/\.[^.]+$/, ""));
+
+        const analyzeRes = await fetch(`${API_BASE}/analyze-photo`, {
+          method: "POST",
+          body: analyzeForm,
+        });
+
+        if (!analyzeRes.ok) {
+          const txt = await analyzeRes.text();
+          throw new Error(`Analysis failed for ${fileName}: ${txt || `HTTP ${analyzeRes.status}`}`);
+        }
+
+        const analyzed = await analyzeRes.json();
+        collectedResults.push(analyzed);
+
+        const pct = 35 + Math.round(((i + 1) / images.length) * 55);
+        setProgressPct(pct);
+      }
+
+      setApiResults(collectedResults);
 
       setProgressPct(100);
       setProgressLabel("Source file processing completed.");
-      setLog("✅ Source file processed successfully.");
+      setLog(`✅ Source file processed successfully. Extracted ${images.length} image(s).`);
       await loadSubmissionStatus(vesselId, areaType);
     } catch (e: any) {
       console.error("SOURCE FILE FLOW ERROR", e);
