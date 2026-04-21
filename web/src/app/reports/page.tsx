@@ -152,7 +152,7 @@ export default function ReportsPage() {
           vessel_id,
           area_type,
           location_tag,
-          file_path,
+          image_path,
           created_at
         )
       `)
@@ -173,7 +173,7 @@ export default function ReportsPage() {
       vessel_id: row.inspection_photos.vessel_id,
       area_type: row.inspection_photos.area_type,
       location_tag: row.inspection_photos.location_tag ?? null,
-      image_path: row.inspection_photos.file_path ?? null,
+      image_path: row.inspection_photos.image_path ?? null,
       created_at: row.inspection_photos.created_at,
     }));
 
