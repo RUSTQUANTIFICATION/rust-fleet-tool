@@ -130,33 +130,59 @@ export default function ReportsPage() {
   }
 
   async function loadApprovedPreview() {
-    try {
-      if (!selectedVessel) {
-        setApprovedRows([]);
-        return;
-      }
-
-      setLoadingApproved(true);
-
-      const params = new URLSearchParams();
-      params.set("vessel_name", selectedVessel.name);
-      params.set("area_type", areaType.toUpperCase().replace(/\s+/g, "_"));
-
-      const res = await fetch(`${API_BASE}/approved-photos?${params.toString()}`);
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data?.detail || "Failed to load approved photos");
-      }
-
-      setApprovedRows((data?.rows || []) as ApprovedPhotoRow[]);
-    } catch (e: any) {
-      setMsg(e?.message || String(e));
+  try {
+    if (!selectedVessel) {
       setApprovedRows([]);
-    } finally {
-      setLoadingApproved(false);
+      return;
     }
+
+    setLoadingApproved(true);
+
+    const normalizedArea = areaType.toUpperCase().replace(/\s+/g, "_");
+
+    const { data, error } = await supabaseBrowser()
+      .from("inspection_reviews")
+      .select(`
+        photo_id,
+        review_status,
+        reviewed_at,
+        inspection_photos!inner (
+          id,
+          session_id,
+          vessel_id,
+          area_type,
+          location_tag,
+          file_path,
+          created_at
+        )
+      `)
+      .eq("review_status", "APPROVED")
+      .eq("inspection_photos.vessel_id", selectedVessel.id)
+      .eq("inspection_photos.area_type", normalizedArea)
+      .order("reviewed_at", { ascending: false });
+
+    if (error) {
+      throw error;
+    }
+
+    const rows: ApprovedPhotoRow[] = (data || []).map((row: any) => ({
+      id: row.inspection_photos.id,
+      session_id: row.inspection_photos.session_id ?? null,
+      vessel_id: row.inspection_photos.vessel_id,
+      area_type: row.inspection_photos.area_type,
+      location_tag: row.inspection_photos.location_tag ?? null,
+      image_path: row.inspection_photos.file_path ?? null,
+      created_at: row.inspection_photos.created_at,
+    }));
+
+    setApprovedRows(rows);
+  } catch (e: any) {
+    setMsg(e?.message || String(e));
+    setApprovedRows([]);
+  } finally {
+    setLoadingApproved(false);
   }
+}
 
   useEffect(() => {
     if (selectedVessel && areaType) {
