@@ -139,6 +139,9 @@ export default function ReportsPage() {
     setLoadingApproved(true);
 
     const normalizedArea = areaType.toUpperCase().replace(/\s+/g, "_");
+    console.log("Reports selectedVessel:", selectedVessel);
+    console.log("Reports selectedVessel.id:", selectedVessel?.id);
+    console.log("Reports normalizedArea:", normalizedArea);
 
     const { data, error } = await supabaseBrowser()
       .from("inspection_reviews")
@@ -146,7 +149,7 @@ export default function ReportsPage() {
         photo_id,
         review_status,
         reviewed_at,
-        inspection_photos!inner (
+        inspection_photos:photo_id!inner (
           id,
           session_id,
           vessel_id,
@@ -161,6 +164,8 @@ export default function ReportsPage() {
       .eq("inspection_photos.area_type", normalizedArea)
       .order("reviewed_at", { ascending: false });
 
+      console.log("Approved preview data:", data);
+      console.log("Approved preview error:", error);
     if (error) {
       throw error;
     }
