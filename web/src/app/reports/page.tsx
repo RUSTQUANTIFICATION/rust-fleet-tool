@@ -167,15 +167,29 @@ export default function ReportsPage() {
       throw error;
     }
 
-    const rows: ApprovedPhotoRow[] = (data || []).map((row: any) => ({
-      id: row.inspection_photos.id,
-      session_id: row.inspection_photos.session_id ?? null,
-      vessel_id: row.inspection_photos.vessel_id,
-      area_type: row.inspection_photos.area_type,
-      location_tag: row.inspection_photos.location_tag ?? null,
-      image_path: row.inspection_photos.image_path ?? null,
-      created_at: row.inspection_photos.created_at,
-    }));
+    console.log("Approved preview raw data:", data);
+
+    const rows: ApprovedPhotoRow[] = (data || [])
+      .map((row: any) => {
+        const photo = Array.isArray(row.inspection_photos)
+          ? row.inspection_photos[0]
+          : row.inspection_photos;
+
+        if (!photo) return null;
+
+        return {
+          id: photo.id,
+          session_id: photo.session_id ?? null,
+          vessel_id: photo.vessel_id,
+          area_type: photo.area_type,
+          location_tag: photo.location_tag ?? null,
+          image_path: photo.image_path ?? null,
+          created_at: photo.created_at,
+        };
+      })
+      .filter(Boolean) as ApprovedPhotoRow[];
+
+    console.log("Approved rows mapped:", rows);
 
     setApprovedRows(rows);
   } catch (e: any) {
