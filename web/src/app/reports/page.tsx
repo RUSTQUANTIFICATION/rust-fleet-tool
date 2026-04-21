@@ -6,7 +6,7 @@ import { type ReportRow } from "@/lib/reportDb";
 import { getInspectionAreaLabel } from "@/lib/inspectionAreaConfig";
 import { supabaseBrowser } from "@/lib/supabaseBrowser";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "https://rust-fleet-tool-api.onrender.com";
 
 const AREA_OPTIONS = [
   "CARGO_HOLD",
@@ -55,6 +55,22 @@ function areaBadgeColor(area: string) {
 function cleanLocationTag(tag: string | null | undefined) {
   if (!tag) return "-";
   return String(tag).replace(/\.(jpg|jpeg|png|webp)$/i, "").replace(/_/g, " ");
+}
+
+function getPhotoUrl(path: string | null | undefined) {
+  if (!path) return "";
+
+  // If already full URL, return as-is
+  if (path.startsWith("http://") || path.startsWith("https://")) {
+    return path;
+  }
+
+  const { data } = supabaseBrowser()
+    .storage
+    .from("rust-photos")
+    .getPublicUrl(path);
+
+  return data?.publicUrl || "";
 }
 
 export default function ReportsPage() {
@@ -215,52 +231,62 @@ export default function ReportsPage() {
   }, [selectedVessel, areaType]);
 
   async function generateReport() {
-    try {
-      if (!selectedVessel) {
-        setMsg("Please select a vessel.");
-        return;
-      }
-
-      setBusy(true);
-      setMsg("Generating report...");
-
-      const formData = new FormData();
-      formData.append("vessel_name", selectedVessel.name);
-      formData.append("area_type", areaType);
-
-      const {
-        data: { user },
-      } = await supabaseBrowser().auth.getUser();
-
-      if (!user?.id) {
-        throw new Error("User not logged in.");
-      }
-
-      formData.append("created_by", user.id);
-
-      const res = await fetch(`${API_BASE}/generate-report`, {
-        method: "POST",
-        body: formData,
-      });
-
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data?.detail || "Report generation failed");
-      }
-
-      setMsg(`✅ Report generated successfully. Approved photos used: ${data?.approved_count ?? 0}`);
-      await loadReportHistory();
-
-      if (data?.report_signed_url) {
-        window.open(data.report_signed_url, "_blank");
-      }
-    } catch (e: any) {
-      setMsg(`❌ ${e?.message || String(e)}`);
-    } finally {
-      setBusy(false);
+  try {
+    if (!selectedVessel) {
+      setMsg("Please select a vessel.");
+      return;
     }
+
+    if (!approvedRows || approvedRows.length === 0) {
+      setMsg("No approved photos available for report generation.");
+      return;
+    }
+
+    setBusy(true);
+    setMsg("Generating report...");
+
+    const summary = {
+      vessel: selectedVessel.name,
+      area: areaType,
+      approved_count: approvedRows.length,
+      generated_at: new Date().toISOString(),
+    };
+
+    const photos = approvedRows.map((r) => ({
+      location_tag: cleanLocationTag(r.location_tag),
+      rust_pct_total: 0,
+      image_url: getPhotoUrl(r.image_path),
+    }));
+
+    const formData = new FormData();
+    formData.append("vessel_name", selectedVessel.name);
+    formData.append("area", areaType);
+    formData.append("summary_json", JSON.stringify(summary));
+    formData.append("photos_json", JSON.stringify(photos));
+
+    const res = await fetch(`${API_BASE}/report/vessel`, {
+      method: "POST",
+      body: formData,
+    });
+
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error(txt || "Report generation failed");
+    }
+
+    const blob = await res.blob();
+    const url = window.URL.createObjectURL(blob);
+    window.open(url, "_blank");
+
+    setMsg(`✅ Report generated successfully (${approvedRows.length} photos)`);
+    await loadReportHistory();
+  } catch (e: any) {
+    console.error("Report error:", e);
+    setMsg(`❌ ${e?.message || String(e)}`);
+  } finally {
+    setBusy(false);
   }
+}
 
   async function openReport(row: any) {
     try {
@@ -541,23 +567,54 @@ export default function ReportsPage() {
                   <table style={{ width: "100%", borderCollapse: "collapse" }}>
                     <thead>
                       <tr style={{ textAlign: "left", background: "#f8fafc" }}>
-                        <th style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>#</th>
-                        <th style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>Location</th>
+                       <th style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>Area</th>
+                        <th style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>Report Type</th>
                         <th style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>Created</th>
+                        <th style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>File</th>
+                        <th style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>Action</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {approvedRows.map((r, i) => (
-                        <tr key={r.id}>
-                          <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9" }}>{i + 1}</td>
-                          <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9" }}>
-                            {cleanLocationTag(r.location_tag)}
-                          </td>
-                          <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9" }}>
-                            {fmtDate(r.created_at)}
-                          </td>
-                        </tr>
-                      ))}
+                      {approvedRows.map((r, i) => {
+                        const imageUrl = getPhotoUrl(r.image_path);
+
+                        return (
+                          <tr key={r.id}>
+                            <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9", verticalAlign: "top" }}>
+                              {i + 1}
+                            </td>
+
+                            <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9", verticalAlign: "top" }}>
+                              {imageUrl ? (
+                                <img
+                                  src={imageUrl}
+                                  alt={cleanLocationTag(r.location_tag) || `approved-${i + 1}`}
+                                  style={{
+                                    width: 120,
+                                    height: 90,
+                                    objectFit: "cover",
+                                    borderRadius: 8,
+                                    border: "1px solid #dbe3ee",
+                                    cursor: "pointer",
+                                    display: "block",
+                                  }}
+                                  onClick={() => window.open(imageUrl, "_blank")}
+                                />
+                              ) : (
+                                <span style={{ color: "#94a3b8" }}>No image</span>
+                              )}
+                            </td>
+
+                            <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9", verticalAlign: "top" }}>
+                              {cleanLocationTag(r.location_tag)}
+                            </td>
+
+                            <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9", verticalAlign: "top" }}>
+                              {fmtDate(r.created_at)}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -652,11 +709,10 @@ export default function ReportsPage() {
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead>
                   <tr style={{ textAlign: "left", background: "#f8fafc" }}>
-                    <th style={{ padding: 12, borderBottom: "1px solid #e5e7eb" }}>Area</th>
-                    <th style={{ padding: 12, borderBottom: "1px solid #e5e7eb" }}>Type</th>
-                    <th style={{ padding: 12, borderBottom: "1px solid #e5e7eb" }}>Created</th>
-                    <th style={{ padding: 12, borderBottom: "1px solid #e5e7eb" }}>File</th>
-                    <th style={{ padding: 12, borderBottom: "1px solid #e5e7eb" }}>Open</th>
+                    <th style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>#</th>
+                    <th style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>Image</th>
+                    <th style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>Location</th>
+                    <th style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>Created</th>
                   </tr>
                 </thead>
                 <tbody>
