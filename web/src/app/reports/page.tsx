@@ -6,7 +6,8 @@ import { type ReportRow } from "@/lib/reportDb";
 import { getInspectionAreaLabel } from "@/lib/inspectionAreaConfig";
 import { supabaseBrowser } from "@/lib/supabaseBrowser";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "https://rust-fleet-tool-api.onrender.com";
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_BASE_URL || "https://rust-fleet-tool-api.onrender.com";
 
 const AREA_OPTIONS = [
   "CARGO_HOLD",
@@ -54,23 +55,34 @@ function areaBadgeColor(area: string) {
 
 function cleanLocationTag(tag: string | null | undefined) {
   if (!tag) return "-";
-  return String(tag).replace(/\.(jpg|jpeg|png|webp)$/i, "").replace(/_/g, " ");
+  return String(tag)
+    .replace(/\.(jpg|jpeg|png|webp)$/i, "")
+    .replace(/_/g, " ")
+    .trim();
 }
 
 function getPhotoUrl(path: string | null | undefined) {
   if (!path) return "";
 
-  // If already full URL, return as-is
   if (path.startsWith("http://") || path.startsWith("https://")) {
     return path;
   }
 
-  const { data } = supabaseBrowser()
-    .storage
-    .from("rust-photos")
-    .getPublicUrl(path);
-
+  const { data } = supabaseBrowser().storage.from("rust-photos").getPublicUrl(path);
   return data?.publicUrl || "";
+}
+
+function normalizeArea(value: string) {
+  return value.toUpperCase().replace(/\s+/g, "_");
+}
+
+function cardStyle(): React.CSSProperties {
+  return {
+    background: "#fff",
+    border: "1px solid #e5e7eb",
+    borderRadius: 20,
+    boxShadow: "0 10px 24px rgba(15, 23, 42, 0.05)",
+  };
 }
 
 export default function ReportsPage() {
@@ -90,8 +102,8 @@ export default function ReportsPage() {
     (async () => {
       try {
         const rows = await getActiveVessels();
-        setVessels(rows);
-        if (rows.length) setVesselId(rows[0].id);
+        setVessels(rows || []);
+        if (rows?.length) setVesselId(rows[0].id);
       } catch (e: any) {
         setMsg(e?.message || String(e));
       }
@@ -114,13 +126,7 @@ export default function ReportsPage() {
 
       setLoadingReports(true);
 
-      const normalizedArea = areaType.toUpperCase().replace(/\s+/g, "_");
-
-      console.log("=== DEBUG REPORT FILTER ===");
-      console.log("Selected Vessel:", selectedVessel);
-      console.log("Selected Vessel ID:", selectedVessel.id);
-      console.log("Area Type (UI):", areaType);
-      console.log("Area Type (Normalized):", normalizedArea);
+      const normalizedArea = normalizeArea(areaType);
 
       const { data, error } = await supabaseBrowser()
         .from("reports")
@@ -129,11 +135,7 @@ export default function ReportsPage() {
         .eq("area_type", normalizedArea)
         .order("created_at", { ascending: false });
 
-      if (error) {
-        throw error;
-      }
-
-      console.log("Fetched Reports:", data);
+      if (error) throw error;
 
       setReports((data || []) as ReportRow[]);
     } catch (e: any) {
@@ -146,75 +148,68 @@ export default function ReportsPage() {
   }
 
   async function loadApprovedPreview() {
-  try {
-    if (!selectedVessel) {
+    try {
+      if (!selectedVessel?.id || !areaType) {
+        setApprovedRows([]);
+        return;
+      }
+
+      setLoadingApproved(true);
+
+      const normalizedArea = normalizeArea(areaType);
+
+      const { data, error } = await supabaseBrowser()
+        .from("inspection_reviews")
+        .select(`
+          photo_id,
+          review_status,
+          reviewed_at,
+          inspection_photos!inspection_reviews_photo_id_fkey (
+            id,
+            session_id,
+            vessel_id,
+            area_type,
+            location_tag,
+            image_path,
+            created_at
+          )
+        `)
+        .eq("review_status", "APPROVED")
+        .eq("inspection_photos.vessel_id", selectedVessel.id)
+        .eq("inspection_photos.area_type", normalizedArea)
+        .order("reviewed_at", { ascending: false });
+
+      if (error) throw error;
+
+      const rows: ApprovedPhotoRow[] = (data || [])
+        .map((row: any) => {
+          const photo = Array.isArray(row.inspection_photos)
+            ? row.inspection_photos[0]
+            : row.inspection_photos;
+
+          if (!photo) return null;
+
+          return {
+            id: photo.id,
+            session_id: photo.session_id ?? null,
+            vessel_id: photo.vessel_id,
+            area_type: photo.area_type,
+            location_tag: photo.location_tag ?? null,
+            image_path: photo.image_path ?? null,
+            created_at: photo.created_at,
+          };
+        })
+        .filter(Boolean) as ApprovedPhotoRow[];
+
+      setApprovedRows(rows);
+    } catch (e: any) {
+      console.error("Approved preview load error:", e);
+      setMsg(e?.message || String(e));
       setApprovedRows([]);
-      return;
+    } finally {
+      setLoadingApproved(false);
     }
-
-    setLoadingApproved(true);
-
-    const normalizedArea = areaType.toUpperCase().replace(/\s+/g, "_");
-
-    const { data, error } = await supabaseBrowser()
-      .from("inspection_reviews")
-      .select(`
-        photo_id,
-        review_status,
-        reviewed_at,
-        inspection_photos!inspection_reviews_photo_id_fkey (
-          id,
-          session_id,
-          vessel_id,
-          area_type,
-          location_tag,
-          image_path,
-          created_at
-        )
-      `)
-      .eq("review_status", "APPROVED")
-      .eq("inspection_photos.vessel_id", selectedVessel.id)
-      .eq("inspection_photos.area_type", normalizedArea)
-      .order("reviewed_at", { ascending: false });
-
-      console.log("Approved preview data:", data);
-      console.log("Approved preview error:", error);
-    if (error) {
-      throw error;
-    }
-
-    console.log("Approved preview raw data:", data);
-
-    const rows: ApprovedPhotoRow[] = (data || [])
-      .map((row: any) => {
-        const photo = Array.isArray(row.inspection_photos)
-          ? row.inspection_photos[0]
-          : row.inspection_photos;
-
-        if (!photo) return null;
-
-        return {
-          id: photo.id,
-          session_id: photo.session_id ?? null,
-          vessel_id: photo.vessel_id,
-          area_type: photo.area_type,
-          location_tag: photo.location_tag ?? null,
-          image_path: photo.image_path ?? null,
-          created_at: photo.created_at,
-        };
-      })
-      .filter(Boolean) as ApprovedPhotoRow[];
-
-    console.log("Approved rows mapped:", rows);
-
-    setApprovedRows(rows);
-  } catch (e: any) {
-    setMsg(e?.message || String(e));
-    setApprovedRows([]);
-  } finally {
-    setLoadingApproved(false);
   }
-}
 
   useEffect(() => {
     if (selectedVessel && areaType) {
@@ -222,71 +217,80 @@ export default function ReportsPage() {
     } else {
       setReports([]);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedVessel, areaType]);
 
   useEffect(() => {
-    if (selectedVessel) {
+    if (selectedVessel && areaType) {
       loadApprovedPreview();
+    } else {
+      setApprovedRows([]);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedVessel, areaType]);
 
   async function generateReport() {
-  try {
-    if (!selectedVessel) {
-      setMsg("Please select a vessel.");
-      return;
+    try {
+      if (!selectedVessel) {
+        setMsg("Please select a vessel.");
+        return;
+      }
+
+      if (!approvedRows || approvedRows.length === 0) {
+        setMsg("No approved photos available for report generation.");
+        return;
+      }
+
+      setBusy(true);
+      setMsg("Generating report...");
+
+      const {
+        data: { user },
+      } = await supabaseBrowser().auth.getUser();
+
+      const normalizedArea = normalizeArea(areaType);
+
+      const summary = {
+        vessel: selectedVessel.name,
+        area: normalizedArea,
+        approved_count: approvedRows.length,
+        generated_at: new Date().toISOString(),
+      };
+
+      const photos = approvedRows.map((r) => ({
+        location_tag: cleanLocationTag(r.location_tag),
+        rust_pct_total: 0,
+        image_url: getPhotoUrl(r.image_path),
+      }));
+
+      const formData = new FormData();
+      formData.append("vessel_name", selectedVessel.name);
+      formData.append("vessel_id", selectedVessel.id);
+      formData.append("area", normalizedArea);
+      formData.append("created_by", user?.id || "");
+      formData.append("summary_json", JSON.stringify(summary));
+      formData.append("photos_json", JSON.stringify(photos));
+
+      const res = await fetch(`${API_BASE}/report/vessel`, {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data?.detail || "Report generation failed");
+      }
+
+      setMsg(`✅ Report generated successfully (${approvedRows.length} photos)`);
+      await loadReportHistory();
+    } catch (e: any) {
+      console.error("Report error:", e);
+      setMsg(`❌ ${e?.message || String(e)}`);
+    } finally {
+      setBusy(false);
     }
-
-    if (!approvedRows || approvedRows.length === 0) {
-      setMsg("No approved photos available for report generation.");
-      return;
-    }
-
-    setBusy(true);
-    setMsg("Generating report...");
-
-    const summary = {
-      vessel: selectedVessel.name,
-      area: areaType,
-      approved_count: approvedRows.length,
-      generated_at: new Date().toISOString(),
-    };
-
-    const photos = approvedRows.map((r) => ({
-      location_tag: cleanLocationTag(r.location_tag),
-      rust_pct_total: 0,
-      image_url: getPhotoUrl(r.image_path),
-    }));
-
-    const formData = new FormData();
-    formData.append("vessel_name", selectedVessel.name);
-    formData.append("area", areaType);
-    formData.append("summary_json", JSON.stringify(summary));
-    formData.append("photos_json", JSON.stringify(photos));
-
-    const res = await fetch(`${API_BASE}/report/vessel`, {
-      method: "POST",
-      body: formData,
-    });
-
-    if (!res.ok) {
-      const txt = await res.text();
-      throw new Error(txt || "Report generation failed");
-    }
-
-    const blob = await res.blob();
-    const url = window.URL.createObjectURL(blob);
-    window.open(url, "_blank");
-
-    setMsg(`✅ Report generated successfully (${approvedRows.length} photos)`);
-    await loadReportHistory();
-  } catch (e: any) {
-    console.error("Report error:", e);
-    setMsg(`❌ ${e?.message || String(e)}`);
-  } finally {
-    setBusy(false);
   }
-}
 
   async function openReport(row: any) {
     try {
@@ -298,13 +302,10 @@ export default function ReportsPage() {
       }
 
       const cleanPath = String(path).replace(/^\/+/, "");
-
       const url = `${API_BASE}/open-report?path=${encodeURIComponent(cleanPath)}`;
-
-      // Open in new tab
       window.open(url, "_blank");
-
     } catch (err) {
+      console.error(err);
       alert("Failed to open report");
     }
   }
@@ -313,8 +314,7 @@ export default function ReportsPage() {
     <div
       style={{
         minHeight: "100vh",
-        background:
-          "linear-gradient(180deg, #f8fafc 0%, #eef2ff 35%, #f8fafc 100%)",
+        background: "linear-gradient(180deg, #f8fafc 0%, #eef2ff 35%, #f8fafc 100%)",
         padding: 24,
       }}
     >
@@ -393,15 +393,7 @@ export default function ReportsPage() {
             marginTop: 20,
           }}
         >
-          <div
-            style={{
-              background: "#fff",
-              border: "1px solid #e5e7eb",
-              borderRadius: 20,
-              padding: 16,
-              boxShadow: "0 10px 24px rgba(15, 23, 42, 0.05)",
-            }}
-          >
+          <div style={{ ...cardStyle(), padding: 16 }}>
             <label style={{ fontWeight: 700, color: "#0f172a" }}>Vessel</label>
             <select
               value={vesselId}
@@ -425,15 +417,7 @@ export default function ReportsPage() {
             </select>
           </div>
 
-          <div
-            style={{
-              background: "#fff",
-              border: "1px solid #e5e7eb",
-              borderRadius: 20,
-              padding: 16,
-              boxShadow: "0 10px 24px rgba(15, 23, 42, 0.05)",
-            }}
-          >
+          <div style={{ ...cardStyle(), padding: 16 }}>
             <label style={{ fontWeight: 700, color: "#0f172a" }}>Area Type</label>
             <select
               value={areaType}
@@ -458,11 +442,8 @@ export default function ReportsPage() {
 
           <div
             style={{
-              background: "#fff",
-              border: "1px solid #e5e7eb",
-              borderRadius: 20,
+              ...cardStyle(),
               padding: 16,
-              boxShadow: "0 10px 24px rgba(15, 23, 42, 0.05)",
               display: "flex",
               flexDirection: "column",
               justifyContent: "center",
@@ -490,11 +471,8 @@ export default function ReportsPage() {
 
           <div
             style={{
-              background: "#fff",
-              border: "1px solid #e5e7eb",
-              borderRadius: 20,
+              ...cardStyle(),
               padding: 16,
-              boxShadow: "0 10px 24px rgba(15, 23, 42, 0.05)",
               display: "flex",
               alignItems: "end",
             }}
@@ -506,17 +484,17 @@ export default function ReportsPage() {
                 width: "100%",
                 padding: "13px 16px",
                 borderRadius: 14,
-                border: "1px solid #0f172a",
+                border: "none",
                 background: busy
-                  ? "#cbd5e1"
-                  : "linear-gradient(135deg, #0f172a 0%, #1d4ed8 100%)",
+                  ? "#94a3b8"
+                  : "linear-gradient(90deg, #0f172a 0%, #2563eb 100%)",
                 color: "#fff",
                 fontWeight: 800,
-                cursor: busy ? "not-allowed" : "pointer",
-                boxShadow: busy ? "none" : "0 8px 20px rgba(29, 78, 216, 0.25)",
+                cursor: busy || !selectedVessel ? "not-allowed" : "pointer",
+                boxShadow: "0 10px 20px rgba(37, 99, 235, 0.25)",
               }}
             >
-              {busy ? "Generating..." : selectedVessel ? "Generate PDF Report" : "Select Vessel to Generate"}
+              {busy ? "Generating..." : "Generate PDF Report"}
             </button>
           </div>
         </div>
@@ -524,38 +502,29 @@ export default function ReportsPage() {
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "1.1fr 0.9fr",
+            gridTemplateColumns: "1.3fr 0.9fr",
             gap: 16,
             marginTop: 20,
             alignItems: "start",
           }}
         >
-          <div
-            style={{
-              background: "#fff",
-              border: "1px solid #e5e7eb",
-              borderRadius: 24,
-              overflow: "hidden",
-              boxShadow: "0 10px 24px rgba(15, 23, 42, 0.05)",
-            }}
-          >
+          <div style={cardStyle()}>
             <div
               style={{
-                padding: 16,
+                padding: 18,
                 borderBottom: "1px solid #eef2f7",
-                background: "linear-gradient(90deg, #f8fafc 0%, #eef2ff 100%)",
+                background: "#f8fbff",
               }}
             >
               <div style={{ fontSize: 18, fontWeight: 800, color: "#0f172a" }}>
                 Approved Photos Preview
               </div>
-              <div style={{ marginTop: 4, fontSize: 13, color: "#64748b" }}>
-                Vessel: <b>{selectedVessel?.name || "-"}</b> | Area:{" "}
-                <b>{getInspectionAreaLabel(areaType)}</b>
+              <div style={{ marginTop: 4, color: "#64748b", fontSize: 14 }}>
+                Vessel: <b>{selectedVessel?.name || "-"}</b> | Area: <b>{getInspectionAreaLabel(areaType)}</b>
               </div>
             </div>
 
-            <div style={{ padding: 16 }}>
+            <div style={{ padding: 18 }}>
               {loadingApproved ? (
                 <div style={{ color: "#64748b" }}>Loading approved photos...</div>
               ) : approvedRows.length === 0 ? (
@@ -566,12 +535,46 @@ export default function ReportsPage() {
                 <div style={{ overflowX: "auto" }}>
                   <table style={{ width: "100%", borderCollapse: "collapse" }}>
                     <thead>
-                      <tr style={{ textAlign: "left", background: "#f8fafc" }}>
-                       <th style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>Area</th>
-                        <th style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>Report Type</th>
-                        <th style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>Created</th>
-                        <th style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>File</th>
-                        <th style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>Action</th>
+                      <tr>
+                        <th
+                          style={{
+                            textAlign: "left",
+                            padding: "10px 12px",
+                            borderBottom: "1px solid #e5e7eb",
+                            width: 52,
+                          }}
+                        >
+                          #
+                        </th>
+                        <th
+                          style={{
+                            textAlign: "left",
+                            padding: "10px 12px",
+                            borderBottom: "1px solid #e5e7eb",
+                            width: 150,
+                          }}
+                        >
+                          Image
+                        </th>
+                        <th
+                          style={{
+                            textAlign: "left",
+                            padding: "10px 12px",
+                            borderBottom: "1px solid #e5e7eb",
+                          }}
+                        >
+                          Location
+                        </th>
+                        <th
+                          style={{
+                            textAlign: "left",
+                            padding: "10px 12px",
+                            borderBottom: "1px solid #e5e7eb",
+                            width: 190,
+                          }}
+                        >
+                          Created
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
@@ -580,11 +583,23 @@ export default function ReportsPage() {
 
                         return (
                           <tr key={r.id}>
-                            <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9", verticalAlign: "top" }}>
+                            <td
+                              style={{
+                                padding: 10,
+                                borderBottom: "1px solid #f1f5f9",
+                                verticalAlign: "top",
+                              }}
+                            >
                               {i + 1}
                             </td>
 
-                            <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9", verticalAlign: "top" }}>
+                            <td
+                              style={{
+                                padding: 10,
+                                borderBottom: "1px solid #f1f5f9",
+                                verticalAlign: "top",
+                              }}
+                            >
                               {imageUrl ? (
                                 <img
                                   src={imageUrl}
@@ -596,7 +611,6 @@ export default function ReportsPage() {
                                     borderRadius: 8,
                                     border: "1px solid #dbe3ee",
                                     cursor: "pointer",
-                                    display: "block",
                                   }}
                                   onClick={() => window.open(imageUrl, "_blank")}
                                 />
@@ -605,11 +619,23 @@ export default function ReportsPage() {
                               )}
                             </td>
 
-                            <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9", verticalAlign: "top" }}>
+                            <td
+                              style={{
+                                padding: 10,
+                                borderBottom: "1px solid #f1f5f9",
+                                verticalAlign: "top",
+                              }}
+                            >
                               {cleanLocationTag(r.location_tag)}
                             </td>
 
-                            <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9", verticalAlign: "top" }}>
+                            <td
+                              style={{
+                                padding: 10,
+                                borderBottom: "1px solid #f1f5f9",
+                                verticalAlign: "top",
+                              }}
+                            >
                               {fmtDate(r.created_at)}
                             </td>
                           </tr>
@@ -622,177 +648,195 @@ export default function ReportsPage() {
             </div>
           </div>
 
-          <div
-            style={{
-              background: "#fff",
-              border: "1px solid #e5e7eb",
-              borderRadius: 24,
-              overflow: "hidden",
-              boxShadow: "0 10px 24px rgba(15, 23, 42, 0.05)",
-            }}
-          >
-            <div
-              style={{
-                padding: 16,
-                borderBottom: "1px solid #eef2f7",
-                background: "linear-gradient(90deg, #f8fafc 0%, #eef2ff 100%)",
-              }}
-            >
-              <div style={{ fontSize: 18, fontWeight: 800, color: "#0f172a" }}>
-                Report Generation Notes
-              </div>
-            </div>
-
-            <div style={{ padding: 18, lineHeight: 1.75, color: "#334155", fontSize: 14 }}>
-              <div>The report will be generated using:</div>
-              <div style={{ marginTop: 10 }}>
-                <div>• only approved photos</div>
-                <div>• selected vessel</div>
-                <div>• selected area type</div>
-                <div>• pictorial corrosion maps where applicable</div>
-                <div>• detailed photo pages</div>
-              </div>
-
+          <div style={{ display: "grid", gap: 16 }}>
+            <div style={cardStyle()}>
               <div
                 style={{
-                  marginTop: 16,
-                  padding: 14,
-                  borderRadius: 16,
-                  background: "#f8fafc",
-                  border: "1px solid #e2e8f0",
+                  padding: 18,
+                  borderBottom: "1px solid #eef2f7",
+                  background: "#f8fbff",
                 }}
               >
-                <div style={{ fontWeight: 700, color: "#0f172a" }}>Cargo Hold Mapping</div>
-                <div style={{ marginTop: 6, fontSize: 13, color: "#64748b" }}>
-                  Real tags such as <code>hold1_fwd_bulkhead</code> are auto-mapped into the
-                  11 cargo hold schematic positions.
+                <div style={{ fontSize: 18, fontWeight: 800, color: "#0f172a" }}>
+                  Report Generation Notes
+                </div>
+              </div>
+
+              <div style={{ padding: 18, lineHeight: 1.75, color: "#334155", fontSize: 14 }}>
+                <div>The report will be generated using:</div>
+                <div style={{ marginTop: 10 }}>
+                  <div>• only approved photos</div>
+                  <div>• selected vessel</div>
+                  <div>• selected area type</div>
+                  <div>• pictorial corrosion maps where applicable</div>
+                  <div>• detailed photo pages</div>
                 </div>
               </div>
             </div>
+
+            <div style={cardStyle()}>
+              <div
+                style={{
+                  padding: 18,
+                  borderBottom: "1px solid #eef2f7",
+                  background: "#f8fbff",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                }}
+              >
+                <div style={{ fontSize: 18, fontWeight: 800, color: "#0f172a" }}>
+                  Report History
+                </div>
+                <div style={{ color: "#64748b", fontSize: 13 }}>
+                  {filteredReports.length} record(s)
+                </div>
+              </div>
+
+              <div style={{ padding: 18 }}>
+                {loadingReports ? (
+                  <div style={{ color: "#64748b" }}>Loading report history...</div>
+                ) : filteredReports.length === 0 ? (
+                  <div style={{ color: "#64748b" }}>
+                    No reports found for the selected vessel and area.
+                  </div>
+                ) : (
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                      <thead>
+                        <tr>
+                          <th
+                            style={{
+                              textAlign: "left",
+                              padding: "10px 12px",
+                              borderBottom: "1px solid #e5e7eb",
+                              width: 48,
+                            }}
+                          >
+                            #
+                          </th>
+                          <th
+                            style={{
+                              textAlign: "left",
+                              padding: "10px 12px",
+                              borderBottom: "1px solid #e5e7eb",
+                              width: 120,
+                            }}
+                          >
+                            Area
+                          </th>
+                          <th
+                            style={{
+                              textAlign: "left",
+                              padding: "10px 12px",
+                              borderBottom: "1px solid #e5e7eb",
+                              width: 110,
+                            }}
+                          >
+                            Type
+                          </th>
+                          <th
+                            style={{
+                              textAlign: "left",
+                              padding: "10px 12px",
+                              borderBottom: "1px solid #e5e7eb",
+                              width: 180,
+                            }}
+                          >
+                            Created
+                          </th>
+                          <th
+                            style={{
+                              textAlign: "left",
+                              padding: "10px 12px",
+                              borderBottom: "1px solid #e5e7eb",
+                            }}
+                          >
+                            File
+                          </th>
+                          <th
+                            style={{
+                              textAlign: "left",
+                              padding: "10px 12px",
+                              borderBottom: "1px solid #e5e7eb",
+                              width: 110,
+                            }}
+                          >
+                            Action
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filteredReports.map((r, i) => (
+                          <tr key={r.id}>
+                            <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9" }}>
+                              {i + 1}
+                            </td>
+                            <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9" }}>
+                              <span
+                                style={{
+                                  display: "inline-flex",
+                                  padding: "8px 12px",
+                                  borderRadius: 999,
+                                  background: `${areaBadgeColor(r.area_type || areaType)}15`,
+                                  color: areaBadgeColor(r.area_type || areaType),
+                                  border: `1px solid ${areaBadgeColor(r.area_type || areaType)}33`,
+                                  fontWeight: 800,
+                                }}
+                              >
+                                {getInspectionAreaLabel((r.area_type as any) || areaType)}
+                              </span>
+                            </td>
+                            <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9" }}>
+                              {r.report_type || "-"}
+                            </td>
+                            <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9" }}>
+                              {fmtDate(r.created_at)}
+                            </td>
+                            <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9" }}>
+                              {r.file_name || "-"}
+                            </td>
+                            <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9" }}>
+                              <button
+                                onClick={() => openReport(r)}
+                                style={{
+                                  padding: "8px 16px",
+                                  borderRadius: 12,
+                                  border: "1px solid #cbd5e1",
+                                  background: "#fff",
+                                  fontWeight: 700,
+                                  cursor: "pointer",
+                                }}
+                              >
+                                Open
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         </div>
 
-        <div
-          style={{
-            marginTop: 20,
-            background: "#fff",
-            border: "1px solid #e5e7eb",
-            borderRadius: 24,
-            overflow: "hidden",
-            boxShadow: "0 10px 24px rgba(15, 23, 42, 0.05)",
-          }}
-        >
-          <div
-            style={{
-              padding: 16,
-              borderBottom: "1px solid #eef2f7",
-              background: "linear-gradient(90deg, #f8fafc 0%, #eef2ff 100%)",
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              gap: 12,
-            }}
-          >
-            <div style={{ fontSize: 18, fontWeight: 800, color: "#0f172a" }}>
-              Report History
-            </div>
-            <div style={{ fontSize: 13, color: "#64748b" }}>
-              {loadingReports ? "Loading..." : `${filteredReports.length} record(s)`}
-            </div>
-
-          </div>
-
-          {loadingReports ? (
-            <div style={{ padding: 16, color: "#64748b" }}>Loading reports...</div>
-          ) : (
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead>
-                  <tr style={{ textAlign: "left", background: "#f8fafc" }}>
-                    <th style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>#</th>
-                    <th style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>Image</th>
-                    <th style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>Location</th>
-                    <th style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>Created</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {reports.map((r) => (
-                    <tr key={r.id}>
-                      <td style={{ padding: 12, borderBottom: "1px solid #f1f5f9" }}>
-                        <span
-                          style={{
-                            display: "inline-flex",
-                            padding: "6px 10px",
-                            borderRadius: 999,
-                            background: `${areaBadgeColor(r.area_type || "")}15`,
-                            color: areaBadgeColor(r.area_type || ""),
-                            fontWeight: 700,
-                            fontSize: 12,
-                            border: `1px solid ${areaBadgeColor(r.area_type || "")}33`,
-                          }}
-                        >
-                          {r.area_type ? getInspectionAreaLabel(r.area_type) : "-"}
-                        </span>
-                      </td>
-                      <td style={{ padding: 12, borderBottom: "1px solid #f1f5f9" }}>
-                        {r.report_type}
-                      </td>
-                      <td style={{ padding: 12, borderBottom: "1px solid #f1f5f9" }}>
-                        {fmtDate(r.created_at)}
-                      </td>
-                      <td style={{ padding: 12, borderBottom: "1px solid #f1f5f9", color: "#64748b" }}>
-                        {((r as any).file_path || r.report_path || "-")
-                          .split("/")
-                          .pop()}
-                      </td>
-                      <td style={{ padding: 12, borderBottom: "1px solid #f1f5f9" }}>
-                        <button
-                          onClick={() => openReport(r)}
-                          style={{
-                            padding: "8px 12px",
-                            borderRadius: 10,
-                            border: "1px solid #cbd5e1",
-                            background: "#fff",
-                            color: "#0f172a",
-                            fontWeight: 700,
-                            cursor: "pointer",
-                          }}
-                        >
-                          Open
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-
-                  {filteredReports.length === 0 && (
-                    <tr>
-                      <td colSpan={5} style={{ padding: 16, color: "#64748b" }}>
-                        No reports found for the selected vessel and area.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-
-        {msg && (
+        {msg ? (
           <div
             style={{
               marginTop: 16,
-              padding: 14,
-              borderRadius: 18,
-              border: "1px solid #dbeafe",
-              background: "#eff6ff",
-              color: "#1e3a8a",
-              whiteSpace: "pre-wrap",
-              fontWeight: 600,
+              padding: "14px 16px",
+              borderRadius: 16,
+              border: msg.startsWith("✅") ? "1px solid #bfdbfe" : "1px solid #fecaca",
+              background: msg.startsWith("✅") ? "#eff6ff" : "#fef2f2",
+              color: msg.startsWith("✅") ? "#1d4ed8" : "#b91c1c",
+              fontWeight: 700,
             }}
           >
             {msg}
           </div>
-        )}
+        ) : null}
       </div>
     </div>
   );
