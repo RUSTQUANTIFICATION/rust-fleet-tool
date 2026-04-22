@@ -46,10 +46,6 @@ function normalizeReportPath(path: string | null | undefined): string | null {
     value = value.replace(/^reports\/reports\//, "reports/");
   }
 
-  if (!value.startsWith("reports/")) {
-    value = `reports/${value}`;
-  }
-
   return value;
 }
 
