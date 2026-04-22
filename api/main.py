@@ -15,7 +15,7 @@ import openpyxl
 import requests
 from dotenv import load_dotenv
 from docx import Document
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from PIL import Image
@@ -181,7 +181,7 @@ def analyze_rust_baseline(bgr: np.ndarray) -> Dict[str, Any]:
     total_pixels = int(h * w)
     rust_pct_total = (rust_pixels / total_pixels) * 100.0
 
-    _, S, V = cv2.split(hsv)
+    _, s_chan, v_chan = cv2.split(hsv)
     rust_idx = mask > 0
     if rust_pixels == 0:
         return {
@@ -193,8 +193,8 @@ def analyze_rust_baseline(bgr: np.ndarray) -> Dict[str, Any]:
             "warnings": [],
         }
 
-    s = S[rust_idx].astype(np.float32)
-    v = V[rust_idx].astype(np.float32)
+    s = s_chan[rust_idx].astype(np.float32)
+    v = v_chan[rust_idx].astype(np.float32)
 
     heavy = (s > 140) & (v < 130)
     moderate = (s > 100) & (v < 170) & ~heavy
@@ -220,6 +220,24 @@ def analyze_rust_baseline(bgr: np.ndarray) -> Dict[str, Any]:
     }
 
 
+def safe_filename(value: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in value.strip())
+    while "__" in cleaned:
+        cleaned = cleaned.replace("__", "_")
+    return cleaned.strip("_") or "report"
+
+
+def ensure_jpeg_bytes_from_url(url: str, max_width: int = 1200, quality: int = 82) -> bytes:
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+
+    img = Image.open(io.BytesIO(resp.content)).convert("RGB")
+    img.thumbnail((max_width, max_width))
+    out = io.BytesIO()
+    img.save(out, format="JPEG", quality=quality, optimize=True)
+    return out.getvalue()
+
+
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -228,6 +246,32 @@ def health():
 @app.get("/healthz")
 def health_check():
     return {"status": "ok"}
+
+
+@app.get("/open-report")
+def open_report(path: str = Query(...)):
+    """
+    Opens a saved PDF report from Supabase Storage.
+    Frontend passes report path stored in reports table.
+    """
+    try:
+        clean_path = path.lstrip("/")
+
+        sb = supabase()
+        public_url = sb.storage.from_(REPORTS_BUCKET).get_public_url(clean_path)
+
+        r = requests.get(public_url, timeout=30)
+        r.raise_for_status()
+
+        return StreamingResponse(
+            io.BytesIO(r.content),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'inline; filename="{os.path.basename(clean_path)}"'
+            },
+        )
+    except Exception as e:
+        return JSONResponse(status_code=404, content={"detail": str(e)})
 
 
 @app.post("/analyze-photo")
@@ -250,11 +294,10 @@ async def analyze_photo(
     print("location_tag:", location_tag)
 
     try:
-        # Convert full URL → relative path
         if storage_path.startswith("http"):
             marker = f"/storage/v1/object/public/{PHOTOS_BUCKET}/"
             if marker in storage_path:
-                storage_path = storage_path.split(marker)[1]
+                storage_path = storage_path.split(marker, 1)[1]
 
         print("FINAL storage_path used:", storage_path)
 
@@ -413,51 +456,107 @@ async def report_vessel(
     area: str = Form(...),
     summary_json: str = Form(...),
     photos_json: str = Form(...),
+    vessel_id: Optional[str] = Form(None),
+    created_by: Optional[str] = Form(None),
 ):
-    summary = json.loads(summary_json)
-    photos = json.loads(photos_json)
+    """
+    Generates PDF, uploads it to rust-reports bucket,
+    inserts row into reports table, and returns JSON.
+    """
+    try:
+        summary = json.loads(summary_json)
+        photos = json.loads(photos_json)
 
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4)
-    styles = getSampleStyleSheet()
-    story: List[Any] = []
-
-    story.append(Paragraph(f"Rust Condition Report - {vessel_name}", styles["Title"]))
-    story.append(Paragraph(f"Area: {area}", styles["Normal"]))
-    story.append(Paragraph(f"Generated: {date.today().isoformat()}", styles["Normal"]))
-    story.append(Spacer(1, 12))
-
-    story.append(Paragraph("Summary", styles["Heading2"]))
-    for k, v in summary.items():
-        story.append(Paragraph(f"{k}: {v}", styles["Normal"]))
-    story.append(Spacer(1, 12))
-
-    story.append(Paragraph("Photo Results", styles["Heading2"]))
-    story.append(Spacer(1, 6))
-
-    for idx, p in enumerate(photos, start=1):
-        story.append(
-            Paragraph(
-                f"{idx}. {p.get('location_tag', '(no tag)')} - Rust {p.get('rust_pct_total')}%",
-                styles["Normal"],
-            )
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(
+            buf,
+            pagesize=A4,
+            leftMargin=30,
+            rightMargin=30,
+            topMargin=30,
+            bottomMargin=30,
         )
-        url = p.get("image_url")
-        if url:
-            try:
-                r = requests.get(url, timeout=20)
-                r.raise_for_status()
-                im = Image.open(io.BytesIO(r.content)).convert("RGB")
-                out = io.BytesIO()
-                im.save(out, format="PNG")
-                out.seek(0)
-                story.append(RLImage(out, width=400, height=250))
-            except Exception:
-                story.append(Paragraph("Image unavailable", styles["Italic"]))
-        story.append(Spacer(1, 12))
-        if idx % 2 == 0:
-            story.append(PageBreak())
+        styles = getSampleStyleSheet()
+        story: List[Any] = []
 
-    doc.build(story)
-    pdf_bytes = buf.getvalue()
-    return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf")
+        story.append(Paragraph(f"Rust Condition Report - {vessel_name}", styles["Title"]))
+        story.append(Paragraph(f"Area: {area}", styles["Normal"]))
+        story.append(Paragraph(f"Generated: {date.today().isoformat()}", styles["Normal"]))
+        story.append(Spacer(1, 12))
+
+        story.append(Paragraph("Summary", styles["Heading2"]))
+        for k, v in summary.items():
+            story.append(Paragraph(f"{k}: {v}", styles["Normal"]))
+        story.append(Spacer(1, 12))
+
+        story.append(Paragraph("Photo Results", styles["Heading2"]))
+        story.append(Spacer(1, 8))
+
+        for idx, p in enumerate(photos, start=1):
+            location_tag = str(p.get("location_tag", "(no tag)"))
+            rust_pct_total = p.get("rust_pct_total", 0)
+
+            story.append(
+                Paragraph(
+                    f"{idx}. {location_tag} - Rust {rust_pct_total}%",
+                    styles["Normal"],
+                )
+            )
+            story.append(Spacer(1, 4))
+
+            url = p.get("image_url")
+            if url:
+                try:
+                    image_bytes = ensure_jpeg_bytes_from_url(str(url), max_width=1200, quality=82)
+                    img_buf = io.BytesIO(image_bytes)
+                    img_buf.seek(0)
+                    story.append(RLImage(img_buf, width=460, height=260))
+                except Exception:
+                    story.append(Paragraph("Image unavailable", styles["Italic"]))
+            else:
+                story.append(Paragraph("Image unavailable", styles["Italic"]))
+
+            story.append(Spacer(1, 12))
+
+            if idx % 2 == 0 and idx < len(photos):
+                story.append(PageBreak())
+
+        doc.build(story)
+        pdf_bytes = buf.getvalue()
+
+        safe_vessel = safe_filename(vessel_name)
+        safe_area = safe_filename(area)
+        file_name = f"{safe_vessel}_{safe_area}_{uuid.uuid4().hex[:8]}.pdf"
+        report_path = f"reports/{file_name}"
+
+        report_url = upload_report(report_path, pdf_bytes, "application/pdf")
+
+        sb = supabase()
+
+        report_payload: Dict[str, Any] = {
+            "vessel_id": vessel_id,
+            "area_type": area,
+            "report_type": "vessel_pdf",
+            "file_name": file_name,
+            "file_path": report_path,
+            "report_path": report_path,
+            "report_url": report_url,
+            "created_by": created_by,
+        }
+
+        report_payload = {k: v for k, v in report_payload.items() if v not in (None, "")}
+
+        sb.from_("reports").insert(report_payload).execute()
+
+        return {
+            "ok": True,
+            "file_name": file_name,
+            "file_path": report_path,
+            "report_path": report_path,
+            "report_url": report_url,
+        }
+
+    except Exception as e:
+        print("=== REPORT/VESSEL ERROR ===")
+        print("error:", repr(e))
+        return JSONResponse(status_code=500, content={"detail": str(e)})
