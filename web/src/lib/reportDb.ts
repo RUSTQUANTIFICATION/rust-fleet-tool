@@ -3,13 +3,14 @@ import { supabaseBrowser } from "./supabaseBrowser";
 
 export type ReportRow = {
   id: string;
-  vessel_id: string;
+  vessel_id: string | null;
   area_type: string | null;
-  session_id: string | null;
-  report_type: string;
+  report_type: string | null;
+  file_name: string | null;
+  file_path: string | null;
   report_path: string | null;
-  file_path?: string | null;
-  created_at: string;
+  report_url: string | null;
+  created_at: string | null;
 };
 
 const REPORTS_BUCKET = "rust-reports";
@@ -59,12 +60,26 @@ export function getReportStoragePath(row: {
   return normalizeReportPath(row.file_path || row.report_path || null);
 }
 
-export async function getReports(vesselId?: string) {
+export function getReportPublicUrl(
+  input: string | { report_path?: string | null; file_path?: string | null }
+): string | null {
+  const path =
+    typeof input === "string" ? normalizeReportPath(input) : getReportStoragePath(input);
+
+  if (!path) return null;
+
+  const { data } = supabaseBrowser().storage.from(REPORTS_BUCKET).getPublicUrl(path);
+  return data?.publicUrl || null;
+}
+
+export async function getReports(vesselId?: string): Promise<ReportRow[]> {
   const sb = supabaseBrowser();
 
   let q = sb
     .from("reports")
-    .select("id,vessel_id,area_type,session_id,report_type,report_path,file_path,created_at")
+    .select(
+      "id,vessel_id,area_type,report_type,file_name,file_path,report_path,report_url,created_at"
+    )
     .order("created_at", { ascending: false });
 
   if (vesselId) {
@@ -74,10 +89,46 @@ export async function getReports(vesselId?: string) {
   const { data, error } = await q;
   if (error) throw error;
 
-  return ((data || []) as ReportRow[]).map((row) => ({
-    ...row,
-    report_path: normalizeReportPath(row.report_path),
+  return ((data || []) as any[]).map((row) => ({
+    id: row.id,
+    vessel_id: row.vessel_id ?? null,
+    area_type: row.area_type ?? null,
+    report_type: row.report_type ?? null,
+    file_name: row.file_name ?? null,
     file_path: normalizeReportPath(row.file_path),
+    report_path: normalizeReportPath(row.report_path),
+    report_url: row.report_url ?? null,
+    created_at: row.created_at ?? null,
+  }));
+}
+
+export async function getReportsByVesselArea(
+  vesselId: string,
+  areaType: string
+): Promise<ReportRow[]> {
+  const sb = supabaseBrowser();
+
+  const { data, error } = await sb
+    .from("reports")
+    .select(
+      "id,vessel_id,area_type,report_type,file_name,file_path,report_path,report_url,created_at"
+    )
+    .eq("vessel_id", vesselId)
+    .eq("area_type", areaType)
+    .order("created_at", { ascending: false });
+
+  if (error) throw error;
+
+  return ((data || []) as any[]).map((row) => ({
+    id: row.id,
+    vessel_id: row.vessel_id ?? null,
+    area_type: row.area_type ?? null,
+    report_type: row.report_type ?? null,
+    file_name: row.file_name ?? null,
+    file_path: normalizeReportPath(row.file_path),
+    report_path: normalizeReportPath(row.report_path),
+    report_url: row.report_url ?? null,
+    created_at: row.created_at ?? null,
   }));
 }
 
@@ -124,9 +175,7 @@ export async function downloadReportBlobUrl(
     return null;
   }
 
-  const { data, error } = await sb.storage
-    .from(REPORTS_BUCKET)
-    .download(path);
+  const { data, error } = await sb.storage.from(REPORTS_BUCKET).download(path);
 
   if (error) {
     console.error("Download report error:", error);
