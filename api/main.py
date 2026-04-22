@@ -1,4 +1,3 @@
-# api/main.py
 from __future__ import annotations
 
 import base64
@@ -238,6 +237,56 @@ def ensure_jpeg_bytes_from_url(url: str, max_width: int = 1200, quality: int = 8
     return out.getvalue()
 
 
+def normalize_report_path(path: str) -> str:
+    value = (path or "").strip().lstrip("/")
+
+    if not value:
+        return ""
+
+    if value.startswith(f"{REPORTS_BUCKET}/"):
+        value = value[len(REPORTS_BUCKET) + 1 :]
+
+    public_marker = f"/storage/v1/object/public/{REPORTS_BUCKET}/"
+    sign_marker = f"/storage/v1/object/sign/{REPORTS_BUCKET}/"
+
+    if public_marker in value:
+        value = value.split(public_marker, 1)[1]
+
+    if sign_marker in value:
+        value = value.split(sign_marker, 1)[1]
+        if "?" in value:
+            value = value.split("?", 1)[0]
+
+    value = value.lstrip("/")
+
+    while value.startswith("reports/reports/"):
+        value = value.replace("reports/reports/", "reports/", 1)
+
+    return value
+
+
+def report_path_candidates(path: str) -> List[str]:
+    base = normalize_report_path(path)
+    if not base:
+        return []
+
+    candidates: List[str] = []
+
+    def add_candidate(v: str) -> None:
+        v = (v or "").strip().lstrip("/")
+        if v and v not in candidates:
+            candidates.append(v)
+
+    add_candidate(base)
+
+    if base.startswith("reports/"):
+        add_candidate(base[len("reports/") :])
+    else:
+        add_candidate(f"reports/{base}")
+
+    return candidates
+
+
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -252,24 +301,39 @@ def health_check():
 def open_report(path: str = Query(...)):
     """
     Opens a saved PDF report from Supabase Storage.
-    Frontend passes report path stored in reports table.
+    Works for both:
+    - reports/<file>.pdf
+    - <file>.pdf
     """
     try:
-        clean_path = path.lstrip("/")
-
         sb = supabase()
-        public_url = sb.storage.from_(REPORTS_BUCKET).get_public_url(clean_path)
+        candidates = report_path_candidates(path)
 
-        r = requests.get(public_url, timeout=30)
-        r.raise_for_status()
+        if not candidates:
+            raise RuntimeError("Invalid report path")
 
-        return StreamingResponse(
-            io.BytesIO(r.content),
-            media_type="application/pdf",
-            headers={
-                "Content-Disposition": f'inline; filename="{os.path.basename(clean_path)}"'
-            },
-        )
+        last_error: Optional[Exception] = None
+
+        for candidate in candidates:
+            try:
+                file_bytes = sb.storage.from_(REPORTS_BUCKET).download(candidate)
+                if file_bytes:
+                    return StreamingResponse(
+                        io.BytesIO(file_bytes),
+                        media_type="application/pdf",
+                        headers={
+                            "Content-Disposition": f'inline; filename="{os.path.basename(candidate)}"'
+                        },
+                    )
+            except Exception as e:
+                last_error = e
+                continue
+
+        if last_error:
+            raise last_error
+
+        raise RuntimeError("Report file not found in storage")
+
     except Exception as e:
         return JSONResponse(status_code=404, content={"detail": str(e)})
 
