@@ -91,12 +91,44 @@ def read_image_to_bgr(file_bytes: bytes) -> np.ndarray:
     return img
 
 
-def read_storage_image_as_bgr(storage_path: str) -> np.ndarray:
-    sb = supabase()
-    data = sb.storage.from_(PHOTOS_BUCKET).download(storage_path)
-    if not data:
-        raise RuntimeError(f"Could not download image from storage path: {storage_path}")
+def normalize_storage_path(path: str | None, bucket: str) -> str:
+    value = (path or "").strip()
+    if not value:
+        return ""
 
+    value = value.lstrip("/")
+
+    if value.startswith(f"{bucket}/"):
+        value = value[len(bucket) + 1 :]
+
+    public_marker = f"/storage/v1/object/public/{bucket}/"
+    sign_marker = f"/storage/v1/object/sign/{bucket}/"
+
+    if public_marker in value:
+        value = value.split(public_marker, 1)[1]
+
+    if sign_marker in value:
+        value = value.split(sign_marker, 1)[1]
+        if "?" in value:
+            value = value.split("?", 1)[0]
+
+    return value.lstrip("/")
+
+
+def download_storage_bytes(bucket: str, storage_path: str) -> bytes:
+    clean_path = normalize_storage_path(storage_path, bucket)
+    if not clean_path:
+        raise RuntimeError(f"Invalid storage path for bucket {bucket}")
+
+    sb = supabase()
+    data = sb.storage.from_(bucket).download(clean_path)
+    if not data:
+        raise RuntimeError(f"Could not download file from storage path: {clean_path}")
+    return data
+
+
+def read_storage_image_as_bgr(storage_path: str) -> np.ndarray:
+    data = download_storage_bytes(PHOTOS_BUCKET, storage_path)
     pil = Image.open(io.BytesIO(data)).convert("RGB")
     rgb = np.array(pil)
     return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
@@ -237,45 +269,59 @@ def ensure_jpeg_bytes_from_url(url: str, max_width: int = 1200, quality: int = 8
     return out.getvalue()
 
 
-def normalize_report_path(path: str) -> str:
-    value = (path or "").strip().lstrip("/")
+def ensure_jpeg_bytes_from_storage_path(
+    storage_path: str,
+    max_width: int = 1200,
+    quality: int = 82,
+) -> bytes:
+    raw = download_storage_bytes(PHOTOS_BUCKET, storage_path)
+    img = Image.open(io.BytesIO(raw)).convert("RGB")
+    img.thumbnail((max_width, max_width))
+    out = io.BytesIO()
+    img.save(out, format="JPEG", quality=quality, optimize=True)
+    return out.getvalue()
 
-    if not value:
-        return ""
 
-    if value.startswith(f"{REPORTS_BUCKET}/"):
-        value = value[len(REPORTS_BUCKET) + 1 :]
+def ensure_jpeg_bytes_from_photo_payload(
+    photo: Dict[str, Any],
+    max_width: int = 1200,
+    quality: int = 82,
+) -> bytes:
+    # Best path first: storage path via service-role download
+    for key in ("image_path", "storage_path", "original_image_path", "file_path"):
+        value = photo.get(key)
+        if value:
+            try:
+                return ensure_jpeg_bytes_from_storage_path(
+                    str(value),
+                    max_width=max_width,
+                    quality=quality,
+                )
+            except Exception as e:
+                print(f"PHOTO STORAGE FETCH FAILED [{key}] -> {value}: {e}")
 
-    public_marker = f"/storage/v1/object/public/{REPORTS_BUCKET}/"
-    sign_marker = f"/storage/v1/object/sign/{REPORTS_BUCKET}/"
+    # Fallback: public/signed URL
+    url = photo.get("image_url")
+    if url:
+        try:
+            return ensure_jpeg_bytes_from_url(str(url), max_width=max_width, quality=quality)
+        except Exception as e:
+            print(f"PHOTO URL FETCH FAILED -> {url}: {e}")
 
-    if public_marker in value:
-        value = value.split(public_marker, 1)[1]
-
-    if sign_marker in value:
-        value = value.split(sign_marker, 1)[1]
-        if "?" in value:
-            value = value.split("?", 1)[0]
-
-    value = value.lstrip("/")
-
-    while value.startswith("reports/reports/"):
-        value = value.replace("reports/reports/", "reports/", 1)
-
-    return value
+    raise RuntimeError("No valid image source available in photo payload")
 
 
 def report_path_candidates(path: str) -> List[str]:
-    base = normalize_report_path(path)
+    base = normalize_storage_path(path, REPORTS_BUCKET)
     if not base:
         return []
 
-    candidates: List[str] = []
+    out: List[str] = []
 
     def add_candidate(v: str) -> None:
         v = (v or "").strip().lstrip("/")
-        if v and v not in candidates:
-            candidates.append(v)
+        if v and v not in out:
+            out.append(v)
 
     add_candidate(base)
 
@@ -284,7 +330,7 @@ def report_path_candidates(path: str) -> List[str]:
     else:
         add_candidate(f"reports/{base}")
 
-    return candidates
+    return out
 
 
 @app.get("/health")
@@ -345,12 +391,6 @@ async def analyze_photo(
     area_type: str = Form(...),
     location_tag: Optional[str] = Form(None),
 ):
-    """
-    Production upload flow:
-    frontend sends photo_id + storage_path after upload to Supabase.
-    Backend downloads original image from storage, runs analyzer,
-    uploads marked/masked outputs back to storage, and upserts photo_findings.
-    """
     print("=== ANALYZE-PHOTO START ===")
     print("photo_id:", photo_id)
     print("storage_path (incoming):", storage_path)
@@ -568,16 +608,17 @@ async def report_vessel(
             )
             story.append(Spacer(1, 4))
 
-            url = p.get("image_url")
-            if url:
-                try:
-                    image_bytes = ensure_jpeg_bytes_from_url(str(url), max_width=1200, quality=82)
-                    img_buf = io.BytesIO(image_bytes)
-                    img_buf.seek(0)
-                    story.append(RLImage(img_buf, width=460, height=260))
-                except Exception:
-                    story.append(Paragraph("Image unavailable", styles["Italic"]))
-            else:
+            try:
+                image_bytes = ensure_jpeg_bytes_from_photo_payload(
+                    p,
+                    max_width=1200,
+                    quality=82,
+                )
+                img_buf = io.BytesIO(image_bytes)
+                img_buf.seek(0)
+                story.append(RLImage(img_buf, width=460, height=260))
+            except Exception as e:
+                print(f"REPORT IMAGE UNAVAILABLE for {location_tag}: {e}")
                 story.append(Paragraph("Image unavailable", styles["Italic"]))
 
             story.append(Spacer(1, 12))
