@@ -68,7 +68,16 @@ function getPhotoUrl(path: string | null | undefined) {
     return path;
   }
 
-  const { data } = supabaseBrowser().storage.from("rust-photos").getPublicUrl(path);
+  const cleanPath = String(path)
+    .replace(/^\/+/, "")
+    .replace(/^rust-photos\//, "")
+    .trim();
+
+  const { data } = supabaseBrowser()
+    .storage
+    .from("rust-photos")
+    .getPublicUrl(cleanPath);
+
   return data?.publicUrl || "";
 }
 
@@ -257,12 +266,34 @@ export default function ReportsPage() {
         generated_at: new Date().toISOString(),
       };
 
-      const photos = approvedRows.map((r) => ({
+      const photos = approvedRows.map((r: any) => ({
         location_tag: cleanLocationTag(r.location_tag),
-        rust_pct_total: 0,
+
+        rust_pct_total: Number(
+          r.rust_pct_total ??
+          r.photo_findings?.rust_pct_total ??
+          r.findings?.rust_pct_total ??
+          0
+        ),
+
+        severity:
+          r.severity ??
+          r.overall_severity ??
+          r.photo_findings?.overall_severity ??
+          r.findings?.overall_severity ??
+          "-",
+
+        confidence:
+          r.confidence ??
+          r.confidence_score ??
+          r.photo_findings?.confidence_score ??
+          r.findings?.confidence_score ??
+          null,
+
+        image_path: r.image_path || null,
+        storage_path: r.image_path || null,
         image_url: getPhotoUrl(r.image_path),
       }));
-
       const formData = new FormData();
       formData.append("vessel_name", selectedVessel.name);
       formData.append("vessel_id", selectedVessel.id);
