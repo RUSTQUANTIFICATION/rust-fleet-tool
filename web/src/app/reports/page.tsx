@@ -25,6 +25,21 @@ type ApprovedPhotoRow = {
   location_tag: string | null;
   image_path: string | null;
   created_at: string;
+
+  // 🔥 ADD THESE (MISSING PART)
+  rust_pct_total?: number | null;
+  rust_pct_light?: number | null;
+  rust_pct_moderate?: number | null;
+  rust_pct_heavy?: number | null;
+
+  overall_severity?: string | null;
+
+  confidence_score?: number | null;
+  image_quality_score?: number | null;
+  false_positive_risk?: string | null;
+
+  largest_patch?: number | null;
+  cluster_count?: number | null;
 };
 
 function fmtDate(s: string | null | undefined) {
@@ -156,70 +171,96 @@ export default function ReportsPage() {
     }
   }
 
-  async function loadApprovedPreview() {
-    try {
-      if (!selectedVessel?.id || !areaType) {
-        setApprovedRows([]);
-        return;
-      }
-
-      setLoadingApproved(true);
-
-      const normalizedArea = normalizeArea(areaType);
-
-      const { data, error } = await supabaseBrowser()
-        .from("inspection_reviews")
-        .select(`
-          photo_id,
-          review_status,
-          reviewed_at,
-          inspection_photos!inspection_reviews_photo_id_fkey (
-            id,
-            session_id,
-            vessel_id,
-            area_type,
-            location_tag,
-            image_path,
-            created_at
-          )
-        `)
-        .eq("review_status", "APPROVED")
-        .eq("inspection_photos.vessel_id", selectedVessel.id)
-        .eq("inspection_photos.area_type", normalizedArea)
-        .order("reviewed_at", { ascending: false });
-
-      if (error) throw error;
-
-      const rows: ApprovedPhotoRow[] = (data || [])
-        .map((row: any) => {
-          const photo = Array.isArray(row.inspection_photos)
-            ? row.inspection_photos[0]
-            : row.inspection_photos;
-
-          if (!photo) return null;
-
-          return {
-            id: photo.id,
-            session_id: photo.session_id ?? null,
-            vessel_id: photo.vessel_id,
-            area_type: photo.area_type,
-            location_tag: photo.location_tag ?? null,
-            image_path: photo.image_path ?? null,
-            created_at: photo.created_at,
-          };
-        })
-        .filter(Boolean) as ApprovedPhotoRow[];
-
-      setApprovedRows(rows);
-    } catch (e: any) {
-      console.error("Approved preview load error:", e);
-      setMsg(e?.message || String(e));
+async function loadApprovedPreview() {
+  try {
+    if (!selectedVessel?.id || !areaType) {
       setApprovedRows([]);
-    } finally {
-      setLoadingApproved(false);
+      return;
     }
-  }
 
+    setLoadingApproved(true);
+
+    const normalizedArea = normalizeArea(areaType);
+
+    const { data, error } = await supabaseBrowser()
+      .from("inspection_reviews")
+      .select(`
+        photo_id,
+        review_status,
+        reviewed_at,
+        inspection_photos!inspection_reviews_photo_id_fkey (
+          id,
+          session_id,
+          vessel_id,
+          area_type,
+          location_tag,
+          image_path,
+          created_at,
+          photo_findings (
+            rust_pct_total,
+            rust_pct_light,
+            rust_pct_moderate,
+            rust_pct_heavy,
+            overall_severity,
+            confidence_score,
+            image_quality_score,
+            false_positive_risk,
+            largest_patch,
+            cluster_count
+          )
+        )
+      `)
+      .eq("review_status", "APPROVED")
+      .eq("inspection_photos.vessel_id", selectedVessel.id)
+      .eq("inspection_photos.area_type", normalizedArea)
+      .order("reviewed_at", { ascending: false });
+
+    if (error) throw error;
+
+    const rows: ApprovedPhotoRow[] = (data || [])
+      .map((row: any) => {
+        const photo = Array.isArray(row.inspection_photos)
+          ? row.inspection_photos[0]
+          : row.inspection_photos;
+
+        if (!photo) return null;
+
+        const findings = Array.isArray(photo.photo_findings)
+          ? photo.photo_findings[0]
+          : photo.photo_findings;
+
+        return {
+          id: photo.id,
+          session_id: photo.session_id ?? null,
+          vessel_id: photo.vessel_id,
+          area_type: photo.area_type,
+          location_tag: photo.location_tag ?? null,
+          image_path: photo.image_path ?? null,
+          created_at: photo.created_at,
+
+          rust_pct_total: findings?.rust_pct_total ?? 0,
+          rust_pct_light: findings?.rust_pct_light ?? 0,
+          rust_pct_moderate: findings?.rust_pct_moderate ?? 0,
+          rust_pct_heavy: findings?.rust_pct_heavy ?? 0,
+          overall_severity: findings?.overall_severity ?? "-",
+          confidence_score: findings?.confidence_score ?? null,
+          image_quality_score: findings?.image_quality_score ?? null,
+          false_positive_risk: findings?.false_positive_risk ?? null,
+          largest_patch: findings?.largest_patch ?? null,
+          cluster_count: findings?.cluster_count ?? null,
+        };
+      })
+      .filter(Boolean) as ApprovedPhotoRow[];
+
+    setApprovedRows(rows);
+  } catch (e: any) {
+    console.error("Approved preview load error:", e);
+    setMsg(e?.message || String(e));
+    setApprovedRows([]);
+  } finally {
+    setLoadingApproved(false);
+  }
+}
   useEffect(() => {
     if (selectedVessel && areaType) {
       loadReportHistory();
