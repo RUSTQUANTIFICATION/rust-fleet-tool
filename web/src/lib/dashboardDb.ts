@@ -21,130 +21,137 @@ export type VesselOverallRow = {
   latest_inspection_at: string | null;
 };
 
-export async function getAutoVesselDashboard(vesselId?: string) {
+export async function getAutoVesselDashboard(vesselId?: string): Promise<{
+  vesselRows: VesselOverallRow[];
+  areaRows: VesselDashboardRow[];
+}> {
   const sb = supabaseBrowser();
 
-  const { data: vesselsData, error: vesselsError } = await sb
-    .from("vessels")
-    .select("id,name")
-    .eq("is_active", true)
-    .order("name", { ascending: true });
-
-  if (vesselsError) throw vesselsError;
-
-  const { data: photosData, error: photosError } = await sb
+  let q = sb
     .from("inspection_photos")
-    .select("id,session_id,vessel_id,area_type,location_tag,image_path,created_at")
+    .select(`
+      id,
+      vessel_id,
+      area_type,
+      created_at,
+      vessels (
+        name
+      )
+    `)
     .order("created_at", { ascending: false });
 
-  if (photosError) throw photosError;
+  if (vesselId) q = q.eq("vessel_id", vesselId);
 
-  const { data: findingsData, error: findingsError } = await sb
+  const { data: photos, error: photoError } = await q;
+  if (photoError) throw photoError;
+
+  const photoIds = (photos || []).map((p: any) => p.id).filter(Boolean);
+
+  if (photoIds.length === 0) {
+    return { vesselRows: [], areaRows: [] };
+  }
+
+  const { data: findings, error: findingsError } = await sb
     .from("photo_findings")
-    .select("photo_id,rust_pct,overall_severity");
+    .select(`
+      photo_id,
+      rust_pct_total,
+      overall_severity
+    `)
+    .in("photo_id", photoIds);
 
   if (findingsError) throw findingsError;
 
-  const vesselMap = new Map<string, string>();
-  (vesselsData || []).forEach((v: any) => vesselMap.set(v.id, v.name));
-
-  const findingMap = new Map<
-    string,
-    { rust_pct: number; overall_severity: string | null }
-  >();
-  (findingsData || []).forEach((f: any) => {
-    findingMap.set(f.photo_id, {
-      rust_pct: Number(f.rust_pct || 0),
-      overall_severity: f.overall_severity || null,
-    });
+  const findingsByPhotoId = new Map<string, any>();
+  (findings || []).forEach((f: any) => {
+    findingsByPhotoId.set(f.photo_id, f);
   });
 
-  let photos = (photosData || []) as Array<{
-    id: string;
-    session_id: string;
-    vessel_id: string;
-    area_type: string;
-    location_tag: string | null;
-    image_path: string | null;
-    created_at: string;
-  }>;
+  const vesselMap = new Map<string, any>();
+  const areaMap = new Map<string, any>();
 
-  if (vesselId) {
-    photos = photos.filter((p) => p.vessel_id === vesselId);
+  for (const p of photos || []) {
+    const finding = findingsByPhotoId.get((p as any).id);
+    const rustPct = Number(finding?.rust_pct_total ?? 0);
+
+    const severity = String(finding?.overall_severity || "").toUpperCase();
+
+    const vesselName = Array.isArray((p as any).vessels)
+      ? (p as any).vessels[0]?.name || "-"
+      : (p as any).vessels?.name || "-";
+
+    const vesselKey = (p as any).vessel_id;
+    const areaKey = `${(p as any).vessel_id}_${(p as any).area_type}`;
+
+    if (!vesselMap.has(vesselKey)) {
+      vesselMap.set(vesselKey, {
+        vessel_id: (p as any).vessel_id,
+        vessel_name: vesselName,
+        total_photos: 0,
+        overall_avg_rust_pct: 0,
+        overall_max_rust_pct: 0,
+        latest_inspection_at: null,
+        _sum: 0,
+      });
+    }
+
+    const v = vesselMap.get(vesselKey);
+    v.total_photos += 1;
+    v._sum += rustPct;
+    v.overall_max_rust_pct = Math.max(v.overall_max_rust_pct, rustPct);
+    if (!v.latest_inspection_at || String((p as any).created_at) > String(v.latest_inspection_at)) {
+      v.latest_inspection_at = (p as any).created_at;
+    }
+
+    if (!areaMap.has(areaKey)) {
+      areaMap.set(areaKey, {
+        vessel_id: (p as any).vessel_id,
+        vessel_name: vesselName,
+        area_type: (p as any).area_type,
+        photo_count: 0,
+        avg_rust_pct: 0,
+        max_rust_pct: 0,
+        severe_count: 0,
+        high_severe_count: 0,
+        latest_inspection_at: null,
+        _sum: 0,
+      });
+    }
+
+    const a = areaMap.get(areaKey);
+    a.photo_count += 1;
+    a._sum += rustPct;
+    a.max_rust_pct = Math.max(a.max_rust_pct, rustPct);
+
+    if (severity === "HIGH" || severity === "SEVERE" || rustPct >= 8) {
+      a.severe_count += 1;
+      a.high_severe_count += 1;
+    }
+
+    if (!a.latest_inspection_at || String((p as any).created_at) > String(a.latest_inspection_at)) {
+      a.latest_inspection_at = (p as any).created_at;
+    }
   }
 
-  const grouped = new Map<string, VesselDashboardRow>();
-  const groupedOverall = new Map<string, VesselOverallRow>();
-
-  for (const p of photos) {
-    const finding = findingMap.get(p.id);
-    const rust = Number(finding?.rust_pct || 0);
-    const sev = (finding?.overall_severity || "").toUpperCase();
-    const vesselName = vesselMap.get(p.vessel_id) || "Unknown Vessel";
-
-    const areaKey = `${p.vessel_id}__${p.area_type}`;
-    const existingArea = grouped.get(areaKey) || {
-      vessel_id: p.vessel_id,
-      vessel_name: vesselName,
-      area_type: p.area_type,
-      photo_count: 0,
-      avg_rust_pct: 0,
-      max_rust_pct: 0,
-      latest_inspection_at: null,
-      severe_count: 0,
+  const vesselRows = Array.from(vesselMap.values()).map((r: any) => {
+    const avg = r.total_photos ? r._sum / r.total_photos : 0;
+    const { _sum, ...clean } = r;
+    return {
+      ...clean,
+      overall_avg_rust_pct: Number(avg.toFixed(2)),
+      overall_max_rust_pct: Number(Number(clean.overall_max_rust_pct || 0).toFixed(2)),
     };
+  });
 
-    existingArea.photo_count += 1;
-    existingArea.avg_rust_pct += rust;
-    existingArea.max_rust_pct = Math.max(existingArea.max_rust_pct, rust);
-
-    if (!existingArea.latest_inspection_at || p.created_at > existingArea.latest_inspection_at) {
-      existingArea.latest_inspection_at = p.created_at;
-    }
-
-    if (sev === "SEVERE" || sev === "HIGH") {
-      existingArea.severe_count += 1;
-    }
-
-    grouped.set(areaKey, existingArea);
-
-    const overall = groupedOverall.get(p.vessel_id) || {
-      vessel_id: p.vessel_id,
-      vessel_name: vesselName,
-      total_photos: 0,
-      overall_avg_rust_pct: 0,
-      overall_max_rust_pct: 0,
-      latest_inspection_at: null,
+  const areaRows = Array.from(areaMap.values()).map((r: any) => {
+    const avg = r.photo_count ? r._sum / r.photo_count : 0;
+    const { _sum, ...clean } = r;
+    return {
+      ...clean,
+      avg_rust_pct: Number(avg.toFixed(2)),
+      max_rust_pct: Number(Number(clean.max_rust_pct || 0).toFixed(2)),
     };
+  });
 
-    overall.total_photos += 1;
-    overall.overall_avg_rust_pct += rust;
-    overall.overall_max_rust_pct = Math.max(overall.overall_max_rust_pct, rust);
-
-    if (!overall.latest_inspection_at || p.created_at > overall.latest_inspection_at) {
-      overall.latest_inspection_at = p.created_at;
-    }
-
-    groupedOverall.set(p.vessel_id, overall);
-  }
-
-  const areaRows = Array.from(grouped.values()).map((r) => ({
-    ...r,
-    avg_rust_pct: Number((r.avg_rust_pct / Math.max(1, r.photo_count)).toFixed(2)),
-    max_rust_pct: Number(r.max_rust_pct.toFixed(2)),
-  }));
-
-  const vesselRows = Array.from(groupedOverall.values()).map((r) => ({
-    ...r,
-    overall_avg_rust_pct: Number((r.overall_avg_rust_pct / Math.max(1, r.total_photos)).toFixed(2)),
-    overall_max_rust_pct: Number(r.overall_max_rust_pct.toFixed(2)),
-  }));
-
-  areaRows.sort((a, b) => b.max_rust_pct - a.max_rust_pct);
-  vesselRows.sort((a, b) => b.overall_max_rust_pct - a.overall_max_rust_pct);
-
-  return {
-    vesselRows,
-    areaRows,
-  };
+  return { vesselRows, areaRows };
 }
