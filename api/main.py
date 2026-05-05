@@ -117,14 +117,29 @@ def normalize_storage_path(path: str | None, bucket: str) -> str:
 
 
 def download_storage_bytes(bucket: str, storage_path: str) -> bytes:
-    clean_path = normalize_storage_path(storage_path, bucket)
-    if not clean_path:
-        raise RuntimeError(f"Invalid storage path for bucket {bucket}")
-
     sb = supabase()
-    data = sb.storage.from_(bucket).download(clean_path)
+
+    path = (storage_path or "").strip()
+
+    # remove full URL if passed
+    if path.startswith("http"):
+        marker = f"/storage/v1/object/public/{bucket}/"
+        if marker in path:
+            path = path.split(marker, 1)[1]
+
+    # remove bucket prefix if mistakenly stored
+    if path.startswith(f"{bucket}/"):
+        path = path[len(bucket) + 1:]
+
+    path = path.lstrip("/")
+
+    print("DOWNLOAD PATH:", path)
+
+    data = sb.storage.from_(bucket).download(path)
+
     if not data:
-        raise RuntimeError(f"Could not download file from storage path: {clean_path}")
+        raise RuntimeError(f"Download failed for: {path}")
+
     return data
 
 
