@@ -4,6 +4,7 @@ import base64
 import io
 import json
 import os
+import tempfile
 import uuid
 from datetime import date
 from typing import Any, Dict, List, Optional
@@ -582,22 +583,37 @@ async def report_vessel(
                     or 0
                 )
 
-                best_image_path = (
-                    p.get("marked_image_path")
-                    or p.get("original_image_path")
-                    or p.get("image_path")
-                    or p.get("storage_path")
-                )
-
                 local_image_path = None
 
-                if best_image_path:
+                # Prefer marked rust overlay image first
+                path_candidates = [
+                    p.get("marked_image_path"),
+                    p.get("marked_image_url"),
+                    p.get("original_image_path"),
+                    p.get("image_path"),
+                    p.get("storage_path"),
+                    p.get("image_url"),
+                ]
+
+                for candidate in path_candidates:
+                    if not candidate:
+                        continue
+
                     try:
-                        image_bytes = ensure_jpeg_bytes_from_storage_path(
-                            str(best_image_path),
-                            max_width=1600,
-                            quality=82,
-                        )
+                        candidate_str = str(candidate)
+
+                        if candidate_str.startswith("http"):
+                            image_bytes = ensure_jpeg_bytes_from_url(
+                                candidate_str,
+                                max_width=1600,
+                                quality=82,
+                            )
+                        else:
+                            image_bytes = ensure_jpeg_bytes_from_storage_path(
+                                candidate_str,
+                                max_width=1600,
+                                quality=82,
+                            )
 
                         fd, tmp_path = tempfile.mkstemp(suffix=".jpg")
                         os.close(fd)
@@ -607,9 +623,10 @@ async def report_vessel(
 
                         local_image_path = tmp_path
                         temp_files.append(tmp_path)
+                        break
 
                     except Exception as e:
-                        print(f"REPORT LOCAL IMAGE FAILED: {best_image_path} -> {e}")
+                        print(f"REPORT IMAGE CANDIDATE FAILED: {candidate} -> {e}")
 
                 prepared_rows.append(
                     {
