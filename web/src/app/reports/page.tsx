@@ -25,21 +25,25 @@ type ApprovedPhotoRow = {
   location_tag: string | null;
   image_path: string | null;
   created_at: string;
+  reviewed_at?: string | null;
+  review_notes?: string | null;
 
-  // 🔥 ADD THESE (MISSING PART)
+  rust_pct?: number | null;
   rust_pct_total?: number | null;
   rust_pct_light?: number | null;
   rust_pct_moderate?: number | null;
   rust_pct_heavy?: number | null;
 
   overall_severity?: string | null;
-
   confidence_score?: number | null;
   image_quality_score?: number | null;
-  false_positive_risk?: string | null;
-
+  false_positive_risk?: string | number | null;
   largest_patch?: number | null;
   cluster_count?: number | null;
+
+  original_image_path?: string | null;
+  marked_image_path?: string | null;
+  mask_image_path?: string | null;
 };
 
 function fmtDate(s: string | null | undefined) {
@@ -185,31 +189,36 @@ async function loadApprovedPreview() {
     const { data, error } = await supabaseBrowser()
       .from("inspection_reviews")
       .select(`
-        photo_id,
-        review_status,
-        reviewed_at,
-        inspection_photos!inspection_reviews_photo_id_fkey (
-          id,
-          session_id,
-          vessel_id,
-          area_type,
-          location_tag,
-          image_path,
-          created_at,
-          photo_findings (
-            rust_pct_total,
-            rust_pct_light,
-            rust_pct_moderate,
-            rust_pct_heavy,
-            overall_severity,
-            confidence_score,
-            image_quality_score,
-            false_positive_risk,
-            largest_patch,
-            cluster_count
-          )
-        )
-      `)
+  photo_id,
+  review_status,
+  review_notes,
+  reviewed_at,
+  inspection_photos!inspection_reviews_photo_id_fkey (
+    id,
+    session_id,
+    vessel_id,
+    area_type,
+    location_tag,
+    image_path,
+    created_at,
+    photo_findings (
+      rust_pct,
+      rust_pct_total,
+      rust_pct_light,
+      rust_pct_moderate,
+      rust_pct_heavy,
+      overall_severity,
+      confidence_score,
+      image_quality_score,
+      false_positive_risk,
+      largest_patch,
+      cluster_count,
+      original_image_path,
+      marked_image_path,
+      mask_image_path
+    )
+  )
+`)
       .eq("review_status", "APPROVED")
       .eq("inspection_photos.vessel_id", selectedVessel.id)
       .eq("inspection_photos.area_type", normalizedArea)
@@ -237,17 +246,25 @@ async function loadApprovedPreview() {
           location_tag: photo.location_tag ?? null,
           image_path: photo.image_path ?? null,
           created_at: photo.created_at,
+          reviewed_at: row.reviewed_at ?? null,
+          review_notes: row.review_notes ?? null,
 
-          rust_pct_total: findings?.rust_pct_total ?? 0,
-          rust_pct_light: findings?.rust_pct_light ?? 0,
-          rust_pct_moderate: findings?.rust_pct_moderate ?? 0,
-          rust_pct_heavy: findings?.rust_pct_heavy ?? 0,
+          rust_pct: Number(findings?.rust_pct_total ?? findings?.rust_pct ?? 0),
+          rust_pct_total: Number(findings?.rust_pct_total ?? findings?.rust_pct ?? 0),
+          rust_pct_light: Number(findings?.rust_pct_light ?? 0),
+          rust_pct_moderate: Number(findings?.rust_pct_moderate ?? 0),
+          rust_pct_heavy: Number(findings?.rust_pct_heavy ?? 0),
+
           overall_severity: findings?.overall_severity ?? "-",
           confidence_score: findings?.confidence_score ?? null,
           image_quality_score: findings?.image_quality_score ?? null,
           false_positive_risk: findings?.false_positive_risk ?? null,
           largest_patch: findings?.largest_patch ?? null,
           cluster_count: findings?.cluster_count ?? null,
+
+          original_image_path: findings?.original_image_path ?? photo.image_path ?? null,
+          marked_image_path: findings?.marked_image_path ?? null,
+          mask_image_path: findings?.mask_image_path ?? null,
         };
       })
       .filter(Boolean) as ApprovedPhotoRow[];
@@ -307,34 +324,112 @@ async function loadApprovedPreview() {
         generated_at: new Date().toISOString(),
       };
 
-      const photos = approvedRows.map((r: any) => ({
-        location_tag: cleanLocationTag(r.location_tag),
+      const photos = approvedRows.map((r: any, index: number) => {
+        const rawLocation = r.location_tag || `POINT_${index + 1}`;
+        const cleanLocation = cleanLocationTag(rawLocation);
 
-        rust_pct_total: Number(
+        const rustPct = Number(
           r.rust_pct_total ??
+          r.rust_pct ??
           r.photo_findings?.rust_pct_total ??
+          r.photo_findings?.rust_pct ??
           r.findings?.rust_pct_total ??
+          r.findings?.rust_pct ??
           0
-        ),
+        );
 
-        severity:
-          r.severity ??
-          r.overall_severity ??
-          r.photo_findings?.overall_severity ??
-          r.findings?.overall_severity ??
-          "-",
+        const originalPath =
+          r.original_image_path ||
+          r.image_path ||
+          r.photo_findings?.original_image_path ||
+          r.findings?.original_image_path ||
+          null;
 
-        confidence:
-          r.confidence ??
-          r.confidence_score ??
-          r.photo_findings?.confidence_score ??
-          r.findings?.confidence_score ??
-          null,
+        const markedPath =
+          r.marked_image_path ||
+          r.photo_findings?.marked_image_path ||
+          r.findings?.marked_image_path ||
+          r.image_path ||
+          null;
 
-        image_path: r.image_path || null,
-        storage_path: r.image_path || null,
-        image_url: getPhotoUrl(r.image_path),
-      }));
+        return {
+          photo_id: r.id,
+          point_no: index + 1,
+          photo_no: index + 1,
+
+          location_tag: rawLocation,
+          location: cleanLocation,
+          zone: cleanLocation,
+
+          rust_pct: rustPct,
+          rust_pct_total: rustPct,
+          rust_pct_light: Number(r.rust_pct_light ?? r.photo_findings?.rust_pct_light ?? r.findings?.rust_pct_light ?? 0),
+          rust_pct_moderate: Number(r.rust_pct_moderate ?? r.photo_findings?.rust_pct_moderate ?? r.findings?.rust_pct_moderate ?? 0),
+          rust_pct_heavy: Number(r.rust_pct_heavy ?? r.photo_findings?.rust_pct_heavy ?? r.findings?.rust_pct_heavy ?? 0),
+
+          severity:
+            r.severity ??
+            r.overall_severity ??
+            r.photo_findings?.overall_severity ??
+            r.findings?.overall_severity ??
+            "-",
+
+          overall_severity:
+            r.overall_severity ??
+            r.severity ??
+            r.photo_findings?.overall_severity ??
+            r.findings?.overall_severity ??
+            "-",
+
+          confidence_score:
+            r.confidence_score ??
+            r.confidence ??
+            r.photo_findings?.confidence_score ??
+            r.findings?.confidence_score ??
+            null,
+
+          image_quality_score:
+            r.image_quality_score ??
+            r.photo_findings?.image_quality_score ??
+            r.findings?.image_quality_score ??
+            null,
+
+          false_positive_risk:
+            r.false_positive_risk ??
+            r.photo_findings?.false_positive_risk ??
+            r.findings?.false_positive_risk ??
+            null,
+
+          largest_patch:
+            r.largest_patch ??
+            r.photo_findings?.largest_patch ??
+            r.findings?.largest_patch ??
+            null,
+
+          cluster_count:
+            r.cluster_count ??
+            r.photo_findings?.cluster_count ??
+            r.findings?.cluster_count ??
+            null,
+
+          review_status: "APPROVED",
+          review_notes: r.review_notes || "-",
+          reviewed_at: r.reviewed_at || null,
+
+          image_path: originalPath,
+          storage_path: originalPath,
+          original_image_path: originalPath,
+          marked_image_path: markedPath,
+          mask_image_path:
+            r.mask_image_path ??
+            r.photo_findings?.mask_image_path ??
+            r.findings?.mask_image_path ??
+            null,
+
+          image_url: getPhotoUrl(originalPath),
+          marked_image_url: getPhotoUrl(markedPath),
+        };
+      });
       const formData = new FormData();
       formData.append("vessel_name", selectedVessel.name);
       formData.append("vessel_id", selectedVessel.id);
