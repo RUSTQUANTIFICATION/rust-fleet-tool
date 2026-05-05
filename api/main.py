@@ -30,7 +30,7 @@ from reportlab.platypus import (
 from supabase import Client, create_client
 
 from rust_analyzer import RustConfig, analyze_rust_bgr
-
+from build_report import build_inspection_report_pdf
 load_dotenv()
 
 app = FastAPI(title="Rust Fleet Analysis API")
@@ -563,76 +563,89 @@ async def report_vessel(
     vessel_id: Optional[str] = Form(None),
     created_by: Optional[str] = Form(None),
 ):
-    """
-    Generates PDF, uploads it to rust-reports bucket,
-    inserts row into reports table, and returns JSON.
-    """
     try:
-        summary = json.loads(summary_json)
         photos = json.loads(photos_json)
-
-        buf = io.BytesIO()
-        doc = SimpleDocTemplate(
-            buf,
-            pagesize=A4,
-            leftMargin=30,
-            rightMargin=30,
-            topMargin=30,
-            bottomMargin=30,
-        )
-        styles = getSampleStyleSheet()
-        story: List[Any] = []
-
-        story.append(Paragraph(f"Rust Condition Report - {vessel_name}", styles["Title"]))
-        story.append(Paragraph(f"Area: {area}", styles["Normal"]))
-        story.append(Paragraph(f"Generated: {date.today().isoformat()}", styles["Normal"]))
-        story.append(Spacer(1, 12))
-
-        story.append(Paragraph("Summary", styles["Heading2"]))
-        for k, v in summary.items():
-            story.append(Paragraph(f"{k}: {v}", styles["Normal"]))
-        story.append(Spacer(1, 12))
-
-        story.append(Paragraph("Photo Results", styles["Heading2"]))
-        story.append(Spacer(1, 8))
-
-        for idx, p in enumerate(photos, start=1):
-            location_tag = str(p.get("location_tag", "(no tag)"))
-            rust_pct_total = p.get("rust_pct_total", 0)
-
-            story.append(
-                Paragraph(
-                    f"{idx}. {location_tag} - Rust {rust_pct_total}%",
-                    styles["Normal"],
-                )
-            )
-            story.append(Spacer(1, 4))
-
-            try:
-                image_bytes = ensure_jpeg_bytes_from_photo_payload(
-                    p,
-                    max_width=1200,
-                    quality=82,
-                )
-                img_buf = io.BytesIO(image_bytes)
-                img_buf.seek(0)
-                story.append(RLImage(img_buf, width=460, height=260))
-            except Exception as e:
-                print(f"REPORT IMAGE UNAVAILABLE for {location_tag}: {e}")
-                story.append(Paragraph("Image unavailable", styles["Italic"]))
-
-            story.append(Spacer(1, 12))
-
-            if idx % 2 == 0 and idx < len(photos):
-                story.append(PageBreak())
-
-        doc.build(story)
-        pdf_bytes = buf.getvalue()
 
         safe_vessel = safe_filename(vessel_name)
         safe_area = safe_filename(area)
         file_name = f"{safe_vessel}_{safe_area}_{uuid.uuid4().hex[:8]}.pdf"
         report_path = f"reports/{file_name}"
+
+        prepared_rows: List[Dict[str, Any]] = []
+        temp_files: List[str] = []
+
+        try:
+            for idx, p in enumerate(photos, start=1):
+                rust_pct = float(
+                    p.get("rust_pct")
+                    or p.get("rust_pct_total")
+                    or 0
+                )
+
+                best_image_path = (
+                    p.get("marked_image_path")
+                    or p.get("original_image_path")
+                    or p.get("image_path")
+                    or p.get("storage_path")
+                )
+
+                local_image_path = None
+
+                if best_image_path:
+                    try:
+                        image_bytes = ensure_jpeg_bytes_from_storage_path(
+                            str(best_image_path),
+                            max_width=1600,
+                            quality=82,
+                        )
+
+                        fd, tmp_path = tempfile.mkstemp(suffix=".jpg")
+                        os.close(fd)
+
+                        with open(tmp_path, "wb") as f:
+                            f.write(image_bytes)
+
+                        local_image_path = tmp_path
+                        temp_files.append(tmp_path)
+
+                    except Exception as e:
+                        print(f"REPORT LOCAL IMAGE FAILED: {best_image_path} -> {e}")
+
+                prepared_rows.append(
+                    {
+                        **p,
+                        "photo_no": p.get("photo_no") or idx,
+                        "point_no": p.get("point_no") or idx,
+                        "location_tag": p.get("location_tag") or p.get("location") or f"POINT {idx}",
+                        "rust_pct": rust_pct,
+                        "rust_pct_total": rust_pct,
+                        "overall_severity": (
+                            p.get("overall_severity")
+                            or p.get("severity")
+                            or "-"
+                        ),
+                        "local_image_path": local_image_path,
+                        "has_photo": True,
+                    }
+                )
+
+            local_pdf_path = build_inspection_report_pdf(
+                vessel_name=vessel_name,
+                area_type=area,
+                approved_rows=prepared_rows,
+                output_filename=file_name,
+            )
+
+            with open(local_pdf_path, "rb") as f:
+                pdf_bytes = f.read()
+
+        finally:
+            for f in temp_files:
+                try:
+                    if f and os.path.exists(f):
+                        os.remove(f)
+                except Exception:
+                    pass
 
         report_url = upload_report(report_path, pdf_bytes, "application/pdf")
 
