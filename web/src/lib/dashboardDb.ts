@@ -51,16 +51,41 @@ export async function getAutoVesselDashboard(vesselId?: string): Promise<{
     return { vesselRows: [], areaRows: [] };
   }
 
-  const { data: findings, error: findingsError } = await sb
-    .from("photo_findings")
-    .select(`
-      photo_id,
-      rust_pct_total,
-      overall_severity
-    `)
-    .in("photo_id", photoIds);
+    // Fetch findings in small batches to avoid oversized
+  // Supabase URLs when the fleet has many inspection photos.
+  const BATCH_SIZE = 50;
 
-  if (findingsError) throw findingsError;
+  const uniquePhotoIds = Array.from(new Set(photoIds));
+
+  const findings: Array<{
+    photo_id: string;
+    rust_pct_total: number | null;
+    overall_severity: string | null;
+  }> = [];
+
+  for (let i = 0; i < uniquePhotoIds.length; i += BATCH_SIZE) {
+    const batchIds = uniquePhotoIds.slice(i, i + BATCH_SIZE);
+
+    const { data, error } = await sb
+      .from("photo_findings")
+      .select("photo_id, rust_pct_total, overall_severity")
+      .in("photo_id", batchIds);
+
+    if (error) {
+      console.error(
+        `Dashboard findings batch failed at offset ${i}:`,
+        error
+      );
+
+      throw new Error(
+        `Failed to load corrosion findings: ${error.message}`
+      );
+    }
+
+    if (data) {
+      findings.push(...data);
+    }
+  }
 
   const findingsByPhotoId = new Map<string, any>();
   (findings || []).forEach((f: any) => {
