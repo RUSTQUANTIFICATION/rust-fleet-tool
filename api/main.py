@@ -390,7 +390,7 @@ def upsert_photo_findings(
     )
 
     if response.data is not True:
-    raise ValueError("ANALYSIS_NOT_ELIGIBLE")
+        raise ValueError("ANALYSIS_NOT_ELIGIBLE")
 
 
 
@@ -885,7 +885,7 @@ async def analyze_photo(
 
 
 
-        analysis_id = uuid4().hex
+        analysis_id = uuid.uuid4().hex
         marked_path = f"{folder}/{stem}_{analysis_id}_marked.jpg"
         mask_path = f"{folder}/{stem}_{analysis_id}_mask.jpg"
 
