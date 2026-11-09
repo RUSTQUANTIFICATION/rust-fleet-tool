@@ -502,9 +502,11 @@ def _overlay_from_mask(bgr: np.ndarray, rust_mask: np.ndarray) -> np.ndarray:
     red[:, :] = (0, 0, 255)
     alpha = 0.35
 
-    overlay[rust_region] = cv2.addWeighted(
-        overlay[rust_region], 1 - alpha, red[rust_region], alpha, 0
-    )
+    # Blend full images first: boolean-indexed arrays can be empty, and
+    # OpenCV returns None for an empty input in some builds.
+    if np.any(rust_region):
+        blended = cv2.addWeighted(overlay, 1 - alpha, red, alpha, 0)
+        overlay[rust_region] = blended[rust_region]
 
     contours, _ = cv2.findContours(rust_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cv2.drawContours(overlay, contours, -1, (0, 255, 255), 2)

@@ -565,6 +565,8 @@ export default function UploadPage() {
       setLog((prev) => `${prev ? prev + "\n" : ""}Session created: ${session.id}`);
       setLog((prev) => `${prev ? prev + "\n" : ""}Uploading ${items.length} file(s)...`);
 
+      let analyzedCount = 0;
+      let failedCount = 0;
       for (let i = 0; i < items.length; i++) {
         const it = items[i];
         const ext = it.file.name.split(".").pop() || "bin";
@@ -613,38 +615,62 @@ export default function UploadPage() {
         setLog((prev) => `${prev ? prev + "\n" : ""}Analyzing (${i + 1}/${items.length}): ${it.file.name}`);
 
         let analysis: any = null;
+        let analysisError: unknown = null;
 
-        try {
-          analysis = await analyzeUploadedPhoto({
-            photoId: photo.id,
-            storagePath: path,
-            areaType,
-            locationTag: it.location_tag || null,
-          });
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            analysis = await analyzeUploadedPhoto({
+              photoId: photo.id,
+              storagePath: path,
+              areaType,
+              locationTag: it.location_tag || null,
+            });
 
-          if (analysis && typeof analysis === "object") {
-            setApiResults((prev) => [...prev, analysis]);
+            if (!analysis || analysis.ok === false) {
+              throw new Error("Analysis returned an unsuccessful response");
+            }
+
+            analysisError = null;
+            break;
+          } catch (err) {
+            analysisError = err;
+
+            if (attempt < 3) {
+              setProgressLabel(
+                `Retrying analysis ${attempt + 1}/3: ${it.file.name}`
+              );
+
+              await new Promise<void>((resolve) =>
+                setTimeout(resolve, attempt * 2000)
+              );
+            }
           }
+        }
+
+        if (analysisError === null && analysis) {
+          analyzedCount++;
+          setApiResults((prev) => [...prev, analysis]);
 
           setLog(
             (prev) =>
-              `${prev ? prev + "\n" : ""}Uploaded + analyzed (${i + 1}/${items.length}): ${it.file.name}\nRust %: ${Number(
-                analysis?.rust_pct_total ?? analysis?.rust_pct ?? 0
-              ).toFixed(2)}`
+              `${prev ? prev + "\n" : ""}Analyzed (${i + 1}/${items.length}): ${it.file.name}`
           );
-        } catch (err: any) {
+        } else {
+          failedCount++;
           setLog(
             (prev) =>
-              `${prev ? prev + "\n" : ""}⚠ Analysis failed for (${i + 1}/${items.length}): ${it.file.name}\nReason: ${
-                err?.message || String(err)
+              `${prev ? prev + "\n" : ""}Analysis pending (${i + 1}/${items.length}): ${it.file.name}. Reason: ${
+                analysisError instanceof Error
+                  ? analysisError.message
+                  : String(analysisError)
               }`
           );
         }
       }
-
       setProgressPct(100);
-      setProgressLabel("Upload and analysis completed.");
-      setLog((prev) => `${prev ? prev + "\n" : ""}✅ Upload complete and analysis finished.`);
+      setProgressLabel(`Analysis complete: ${analyzedCount} successful, ${failedCount} pending.`);
+      setLog((prev) => `${prev ? prev + "\n" : ""}Upload completed. Analyzed: ${analyzedCount}. Pending: ${failedCount}.`);
+
       setItems([]);
       await loadSubmissionStatus(vesselId, areaType);
     } catch (e: any) {
